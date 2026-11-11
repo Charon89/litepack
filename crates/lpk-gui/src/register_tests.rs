@@ -707,17 +707,130 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     let exe = format!("{}.exe", conf["mainBinaryName"].as_str().unwrap());
     assert!(nsh.contains(&format!("!define LPK_PRODUCT \"{product}\"")));
     assert!(nsh.contains(&format!("!define LPK_MAIN_EXE \"{exe}\"")));
-    // R329: every RunOnce command deletes the shell DLL and then empty folders only.
-    let commands: Vec<&str> = nsh.lines().filter(|l| l.contains("cmd.exe")).collect();
-    assert_eq!(commands.len(), 1, "{commands:?}");
-    let cmd = commands[0].to_lowercase();
-    assert!(!cmd.contains("/s"), "{cmd}");
-    assert!(
-        cmd.contains(r#"del /f /q "$instdir\shell\${version}\lpk_shell.dll""#),
-        "{cmd}"
+    // R329, R335, R336: each RunOnce value is one cmd line that changes to $INSTDIR once (`&&`: nothing runs if it
+    // is gone) and then runs its steps in sequence with relative paths: deletes of LitePack's own files only (the
+    // shell DLL; bin\'s set-aside `lpk*.exe.old-*`), then non-recursive rmdirs. No delayed expansion.
+    assert!(nsh.contains(r#"!define LPK_CMD '"$SYSDIR\cmd.exe" /d /v:off /c'"#));
+    let commands: Vec<String> = nsh
+        .lines()
+        .filter_map(|l| l.split("'${LPK_CMD} ").nth(1))
+        .map(|a| a.trim_end().trim_end_matches('\'').to_lowercase())
+        .collect();
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    for cmd in &commands {
+        assert!(!cmd.contains("/s"), "{cmd}");
+        let body = cmd
+            .strip_prefix(r#"cd /d "$instdir" && ("#)
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{cmd}"));
+        let mut parts = body.split(" & ");
+        let del = parts.next().unwrap();
+        let files: Vec<&str> = del
+            .strip_prefix("del /f /q ")
+            .expect(del)
+            .split(' ')
+            .collect();
+        for f in files {
+            assert!(
+                f == r"shell\${version}\lpk_shell.dll" || f == r"bin\lpk*.exe.old-*",
+                "{f}"
+            );
+        }
+        for part in parts {
+            assert!(part == "cd .." || part.starts_with("rmdir "), "{part}");
+            assert!(!part.contains(':') && !part.contains("$instdir"), "{part}");
+        }
+    }
+    // The whole stored string is measured, and nothing is written past 260 or for a path holding `%` or `!`.
+    let write = nsh
+        .split("!macro LPK_RUNONCE_WRITE")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    let at = |s: &str| write.find(s).unwrap_or_else(|| panic!("{s}"));
+    assert!(at("LPK_FIND_CMD_CHAR") < at("WriteRegStr"));
+    assert!(at("StrLen $R6 $R8") < at("WriteRegStr"));
+    assert!(at("${If} $R6 <= 260") < at("${AndIf} $R7 == \"\""));
+    assert!(at("${AndIf} $R7 == \"\"") < at("WriteRegStr"));
+    assert_eq!(
+        nsh.matches("WriteRegStr HKCU \"${LPK_RUNONCE}\"").count(),
+        1
     );
-    for part in cmd.split(" & ").skip(1) {
-        assert!(part.trim().starts_with("rmdir \"$instdir"), "{part}");
+    // The refusals include a path holding `%` or `!` (LPK_REFUSE: GUI init, the first section, PREINSTALL).
+    let refuse = nsh.split("!macro LPK_REFUSE").nth(1).unwrap();
+    assert!(refuse
+        .trim_start()
+        .starts_with("remove\n  !insertmacro LPK_FIND_CMD_CHAR"));
+    // A reinstall cancels every `LitePack *` value before the next logon could remove the new installation's files.
+    let cancel = nsh
+        .split("!macro LPK_CANCEL_PENDING_RUNONCE")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    assert!(cancel.contains("StrCpy $R7 $R6 9"));
+    assert!(cancel.contains(r#"${If} $R7 == "LitePack ""#));
+}
+
+fn nsh_macro<'a>(nsh: &'a str, name: &str) -> &'a str {
+    nsh.split(&format!("!macro {name}\n"))
+        .nth(1)
+        .or_else(|| nsh.split(&format!("!macro {name} ")).nth(1))
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap_or_else(|| panic!("{name}"))
+}
+
+#[test]
+fn an_upgrade_sets_every_bin_executable_aside_before_any_file_is_written() {
+    // R334, R336: Windows refuses to overwrite a running executable but allows a rename, so PREINSTALL renames each of
+    // bin\'s executables the overlay installs (tauri.nsis.conf.json) to <name>.old-<n> after the running check and
+    // before the RunOnce values are cancelled; the copies are deleted only in POSTINSTALL, once the new files exist;
+    // the uninstaller sets running ones aside the same way.
+    let nsh = include_str!("../installer.nsh");
+    let conf: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.nsis.conf.json")).unwrap();
+    let mut bin: Vec<String> = conf["bundle"]["resources"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|v| v.as_str()?.strip_prefix("bin/").map(str::to_owned))
+        .collect();
+    bin.sort();
+    let named = |body: &str, call: &str| {
+        let mut v: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(call))
+            .map(|s| s.split('"').next().unwrap().to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let set_aside = nsh_macro(nsh, "LPK_SET_ASIDE_BIN");
+    assert_eq!(named(set_aside, "!insertmacro LPK_SET_ASIDE \""), bin);
+    assert_eq!(named(set_aside, "!insertmacro LPK_PUT_BACK \""), bin);
+    // Before the copy, only an earlier install's leftovers are deleted.
+    let deletes: Vec<&str> = set_aside.lines().filter(|l| l.contains("Delete")).collect();
+    assert_eq!(deletes, [r#"  Delete "$INSTDIR\bin\lpk*.exe.old-*""#]);
+    let finish = nsh_macro(nsh, "LPK_FINISH_SET_ASIDE");
+    assert_eq!(named(finish, "!insertmacro LPK_MISSING \""), bin);
+    assert_eq!(named(finish, "!insertmacro LPK_PUT_BACK \""), bin);
+    assert!(finish.find("LPK_MISSING").unwrap() < finish.find("LPK_DROP_SET_ASIDE").unwrap());
+    let pre = nsh_macro(nsh, "NSIS_HOOK_PREINSTALL");
+    let at = |s: &str| {
+        pre.find(s)
+            .unwrap_or_else(|| panic!("{s} not in PREINSTALL"))
+    };
+    assert!(at("Call LpkCheckRunning") < at("LPK_SET_ASIDE_BIN"));
+    assert!(at("LPK_SET_ASIDE_BIN") < at("LPK_CANCEL_PENDING_RUNONCE"));
+    assert!(nsh_macro(nsh, "NSIS_HOOK_POSTINSTALL").contains("!insertmacro LPK_FINISH_SET_ASIDE"));
+    let pre_un = nsh_macro(nsh, "NSIS_HOOK_PREUNINSTALL");
+    assert_eq!(
+        named(pre_un, "!insertmacro LPK_UNINSTALL_SET_ASIDE \""),
+        bin
+    );
+    for hook in ["NSIS_HOOK_PREUNINSTALL", "NSIS_HOOK_POSTUNINSTALL"] {
+        let body = nsh_macro(nsh, hook);
+        assert!(body.contains(r#"$INSTDIR\bin\lpk*.exe.old-*"#), "{hook}");
+        assert!(!body.contains(r#"bin\*.old"#), "{hook}");
     }
 }
 

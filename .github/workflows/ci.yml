@@ -391,7 +391,7 @@ jobs:
         run: cargo tauri build --ci -- --locked
       - name: Make both zips
         run: |
-          version="$(python -I -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          version="$(python -I -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])" | tr -d '\r')"
           python -I scripts/make-zips.py --bin target/release --arch x64 --version "$version" \
             --timestamp "$(git log -1 --format=%ct)" --out "$ZIPS"
           for z in "$ZIPS"/*.zip; do python -I -m zipfile -l "$z"; done
@@ -548,6 +548,8 @@ jobs:
         run: |
           python -I scripts/e7-residue.py --self-test
           python -I scripts/e7-bump-version.py --self-test
+          python -I scripts/e7-sha256.py --self-test
+          python -I scripts/e7-runonce.py --self-test
       - name: tauri-cli through cargo (pinned)
         run: cargo install tauri-cli --version 2.12.4 --locked
       - name: Build the release binaries
@@ -635,18 +637,35 @@ jobs:
           "$INST/bin/lpk.exe" l "$W/small.zip"
           "$INST/bin/lpk.exe" x "$W/small.zip" "$W/out-cli"
           cmp "$W/in/sub/f2.txt" "$W/out-cli/sub/f2.txt"
+      # R334: the upgrade runs beside a bin\lpk.exe that is still compressing. Windows refuses to overwrite a running
+      # executable but lets it be renamed: PREINSTALL sets each of bin\'s executables aside as <name>.old-<n> before
+      # the copy (installer.nsh). The step requires that lpk.exe is still running when the upgrade starts, rc 0, every
+      # installed binary N+1's, the held one set aside, and the running lpk.exe's own result (exit code, `lpk t`).
+      # The .sha256 files are read through scripts/e7-sha256.py: Git Bash's sha256sum writes `<hash> *<name>`.
       - name: Upgrade to N+1 silently while bin\lpk.exe runs
         run: |
-          python -I -c "import os; open(r'$W/big.bin','wb').write(os.urandom(400*1024*1024))"
-          "$INST/bin/lpk.exe" a "$W/big.lpk" "$W/big.bin" > "$W/running.log" 2>&1 &
+          # About 256 MiB of text-like data (scripts/e7-gen-text.py): no chunk repeats, so dedup cannot shorten it,
+          # and single-threaded LZMA takes minutes on it.
+          python -I scripts/e7-gen-text.py "$W/big.txt" 256
+          ls -la "$W/big.txt"
+          start=$SECONDS
+          "$INST/bin/lpk.exe" a --balanced --threads 1 "$W/big.lpk" "$W/big.txt" > "$W/running.log" 2>&1 &
           pid=$!
-          sleep 3
-          kill -0 "$pid" && echo "bin\\lpk.exe is running (pid $pid) when the upgrade starts" \
-            || echo "bin\\lpk.exe had already exited when the upgrade started"
+          sleep 10
           (cd "$INST/bin" && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe) > "$W/N.sha256"
+          echo "N's bin\\ before the upgrade:"; cat "$W/N.sha256"
+          # R330: N's lpk.exe must differ from N+1's, so the overwrite check below cannot pass vacuously.
+          n_lpk="$(python -I scripts/e7-sha256.py "$W/N.sha256" lpk.exe)"
+          n1_lpk="$(python -I scripts/e7-sha256.py "$SETUP/N1.sha256" lpk.exe)"
+          test "$n_lpk" != "$n1_lpk" || { echo "N's and N+1's lpk.exe are the same ($n_lpk)"; exit 1; }
+          kill -0 "$pid" 2>/dev/null || {
+            cat "$W/running.log"
+            echo "lpk.exe exited before the upgrade began; the test cannot show an upgrade while it runs"; exit 1; }
+          echo "bin\\lpk.exe is running (pid $pid, $((SECONDS - start)) s) when the upgrade starts"
           rc=0; "$SETUP/N1-setup.exe" /S || rc=$?
-          echo "upgrade while lpk.exe ran: installer exit code $rc"
-          lpk_rc=0; wait "$pid" || lpk_rc=$?; echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running.log"
+          echo "upgrade while lpk.exe ran: installer exit code $rc after $((SECONDS - start)) s"
+          if kill -0 "$pid" 2>/dev/null; then still=yes; else still=no; fi
+          echo "bin\\lpk.exe still running when the upgrade ended: $still"
           ls -laR "$INST"
           # Pending renames (read only): a file the installer could not replace would be queued here for a reboot.
           python -I -c "
@@ -660,27 +679,40 @@ jobs:
           hits = [o for o in ops if inst in o.lower()]
           print(f'PendingFileRenameOperations: {len(ops)} entries, {len(hits)} under the install folder', hits)
           " "$INST"
-          echo "N's bin\\ before the upgrade:"; cat "$W/N.sha256"
-          # R330: N's lpk.exe must differ from N+1's, so the overwrite check below cannot pass vacuously.
-          n_lpk="$(grep " lpk.exe$" "$W/N.sha256" | cut -d' ' -f1)"
-          n1_lpk="$(grep " lpk.exe$" "$SETUP/N1.sha256" | cut -d' ' -f1)"
-          test -n "$n_lpk" -a "$n_lpk" != "$n1_lpk" || { echo "N's and N+1's lpk.exe are the same ($n_lpk)"; exit 1; }
+          # R335: any RunOnce value the upgrade wrote (an old shell folder Explorer holds) is at most 260 characters.
+          echo "RunOnce LitePack values after the upgrade:"; python -I scripts/e7-runonce.py show
+          set_aside="$(cd "$INST/bin" && ls -1 -- *.old-* 2>/dev/null || true)"
+          echo "set aside in bin\\ after the upgrade: ${set_aside:-none}"
+          lpk_rc=0; wait "$pid" || lpk_rc=$?
+          echo "the running lpk.exe exited with $lpk_rc after $((SECONDS - start)) s; its output:"; cat "$W/running.log"
           echo "bin\\ after the upgrade, against N+1's inputs:"
+          names="$(python -I scripts/e7-sha256.py --names "$SETUP/N1.sha256")"
           bad=0
-          while read -r sum name; do
-            got="$(sha256sum "$INST/bin/$name" 2>/dev/null | cut -d' ' -f1 || true)"
-            [ "$name" = lpk-gui.exe ] && got="$(sha256sum "$INST/lpk-gui.exe" | cut -d' ' -f1)"
+          for name in $names; do
+            sum="$(python -I scripts/e7-sha256.py "$SETUP/N1.sha256" "$name")"
+            if [ "$name" = lpk-gui.exe ]; then file="$INST/lpk-gui.exe"; else file="$INST/bin/$name"; fi
+            got="missing"; test -f "$file" && got="$(sha256sum "$file" | cut -d' ' -f1)"
             echo "$name: installed $got, N+1 $sum"
             [ "$got" = "$sum" ] || bad=1
-          done < "$SETUP/N1.sha256"
+          done
           test "$rc" -eq 0 || { echo "the upgrade's installer failed with $rc"; exit 1; }
           test "$bad" -eq 0 || { echo "a file of bin\\ or the GUI is not N+1's after the upgrade"; exit 1; }
+          # R336: a pass must prove the set-aside, so lpk.exe must still run when the upgrade ends.
+          test "$still" = yes || { echo "bin\\lpk.exe exited while the upgrade ran; the set-aside is not shown"; exit 1; }
+          grep -qxF "lpk.exe.old-1" <<<"$set_aside" \
+            || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
+          test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the upgrade"; exit 1; }
+          "$INST/bin/lpk.exe" t "$W/big.lpk" || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
+          echo "the running lpk.exe's archive tests as valid with N+1's lpk.exe"
+          rm -f "$W/big.txt" "$W/big.lpk"
           python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
       - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
         run: |
           "$INST/uninstall.exe" /S
           scripts/e7-wait-uninstaller.sh "$INST"
           ls -la "$INST" 2>/dev/null || echo "install folder gone"
+          # R334: the upgrade's set-aside lpk.exe.old-1 (its process has exited) goes with the uninstall.
+          if ls -la "$INST/bin/"*.old-* 2>/dev/null; then echo "after the uninstall: a set-aside executable left" >> "$SNAP/verdicts"; fi
           python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
             --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
@@ -694,19 +726,13 @@ jobs:
           python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \
             --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
-      # R329: a shell DLL held at uninstall (simulated: a process holds it open without delete sharing) leaves one
-      # RunOnce command that deletes the DLL and then only empty folders; a reinstall before the next logon cancels it.
-      - name: A held shell DLL at uninstall - the RunOnce command, then a reinstall cancelling it
+      # R329, R335, R336: a shell DLL held at uninstall (simulated: a process holds it open without delete sharing)
+      # leaves one RunOnce value, `LitePack uninstall`, of at most 260 characters: one cmd line that deletes the DLL,
+      # then only empty folders; a reinstall before the next logon cancels it. scripts/e7-runonce.py lists them (LF only)
+      # and runs them as the next logon would.
+      - name: A held shell DLL at uninstall - the RunOnce commands, then a reinstall cancelling them
         run: |
           dll="$INST/shell/0.0.1/lpk_shell.dll"
-          runonce() { python -I -c "
-          import winreg
-          try:
-              with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\RunOnce') as k:
-                  print(winreg.QueryValueEx(k, 'LitePack uninstall')[0])
-          except OSError:
-              pass
-          "; }
           hold() { python -I -c "import sys, time; f = open(sys.argv[1], 'rb'); print('held', flush=True); time.sleep(900)" "$dll" & holder=$!; sleep 2; }
           for part in logon reinstall; do
             "$SETUP/N-setup.exe" /S
@@ -714,28 +740,56 @@ jobs:
             "$INST/uninstall.exe" /S
             scripts/e7-wait-uninstaller.sh "$INST" || true
             ls -laR "$INST" || true
-            cmd="$(runonce)"
-            echo "RunOnce [LitePack uninstall] ($part): $cmd"
-            test -n "$cmd" || { echo "held DLL: no RunOnce command" >> "$SNAP/verdicts"; kill "$holder"; continue; }
-            case "$cmd" in *"/s"*|*"/S"*) echo "held DLL: the RunOnce command is recursive" >> "$SNAP/verdicts";; esac
+            cmds="$(python -I scripts/e7-runonce.py show)" \
+              || echo "held DLL: a RunOnce command over 260 characters ($part)" >> "$SNAP/verdicts"
+            echo "RunOnce LitePack values ($part):"; echo "$cmds"
+            test -n "$cmds" || { echo "held DLL: no RunOnce command" >> "$SNAP/verdicts"; kill "$holder"; continue; }
+            case "$cmds" in *"/s"*|*"/S"*) echo "held DLL: a RunOnce command is recursive" >> "$SNAP/verdicts";; esac
+            grep -qE "^LitePack uninstall[[:space:]]" <<<"$cmds" || echo "held DLL: no 'LitePack uninstall' value" >> "$SNAP/verdicts"
             kill "$holder"; wait "$holder" 2>/dev/null || true
             if [ "$part" = logon ]; then
-              # What the next logon runs; then Windows deletes the value itself.
-              python -I -c "import subprocess, sys; print('exit', subprocess.run(sys.argv[1]).returncode)" "$cmd"
-              test ! -e "$INST" || { ls -laR "$INST"; echo "held DLL: the RunOnce command left $INST" >> "$SNAP/verdicts"; }
-              python -I -c "
-          import winreg
-          with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\RunOnce', 0, winreg.KEY_SET_VALUE) as k:
-              winreg.DeleteValue(k, 'LitePack uninstall')
-          "
+              # What the next logon runs, in order; each value is deleted after it ran, as Windows does.
+              python -I scripts/e7-runonce.py run
+              test ! -e "$INST" || { ls -laR "$INST"; echo "held DLL: the RunOnce commands left $INST" >> "$SNAP/verdicts"; }
+              test -z "$(python -I scripts/e7-runonce.py show)" || echo "held DLL: RunOnce values left after the run" >> "$SNAP/verdicts"
             else
               "$SETUP/N-setup.exe" /S
-              test -z "$(runonce)" || echo "held DLL: a reinstall did not cancel the RunOnce command" >> "$SNAP/verdicts"
+              test -z "$(python -I scripts/e7-runonce.py show)" || echo "held DLL: a reinstall did not cancel the RunOnce commands" >> "$SNAP/verdicts"
               test -f "$INST/lpk-gui.exe" || echo "held DLL: the reinstall is incomplete" >> "$SNAP/verdicts"
               "$INST/uninstall.exe" /S
               scripts/e7-wait-uninstaller.sh "$INST"
             fi
           done
+      # R336: an uninstall while bin\lpk.exe runs. The uninstaller renames it aside (bin\lpk.exe.old-1) and leaves one
+      # RunOnce value, `LitePack uninstall`, that removes it and the then-empty folders; run as the next logon would
+      # (scripts/e7-runonce.py, in a seeded random order), nothing of the install is left.
+      - name: Uninstall while bin\lpk.exe runs, then the next logon's RunOnce command
+        run: |
+          "$SETUP/N-setup.exe" /S
+          python -I scripts/e7-gen-text.py "$W/big2.txt" 128
+          "$INST/bin/lpk.exe" a --balanced --threads 1 "$W/big2.lpk" "$W/big2.txt" > "$W/running2.log" 2>&1 &
+          pid=$!
+          sleep 10
+          kill -0 "$pid" 2>/dev/null || {
+            cat "$W/running2.log"
+            echo "lpk.exe exited before the uninstall began; the test cannot show an uninstall while it runs"; exit 1; }
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST" || true
+          kill -0 "$pid" 2>/dev/null || { echo "lpk.exe exited during the uninstall; the set-aside is not shown"; exit 1; }
+          echo "bin\\lpk.exe still running after the uninstall; what is left:"; ls -laR "$INST" || true
+          test -f "$INST/bin/lpk.exe.old-1" || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
+          cmds="$(python -I scripts/e7-runonce.py show)" \
+            || { echo "$cmds"; echo "a RunOnce command over 260 characters"; exit 1; }
+          echo "RunOnce LitePack values:"; echo "$cmds"
+          grep -qE "^LitePack uninstall[[:space:]]" <<<"$cmds" || { echo "no 'LitePack uninstall' value"; exit 1; }
+          lpk_rc=0; wait "$pid" || lpk_rc=$?
+          echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running2.log"
+          test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the uninstall"; exit 1; }
+          python -I scripts/e7-runonce.py run
+          test ! -e "$INST" || { ls -laR "$INST"; echo "the RunOnce command left $INST"; exit 1; }
+          test -z "$(python -I scripts/e7-runonce.py show)" || { echo "RunOnce values left after the run"; exit 1; }
+          rm -f "$W/big2.txt" "$W/big2.lpk"
+          echo "uninstall while lpk.exe ran: nothing of the install left after the next logon's command"
       # R330: the held-DLL step's installs and uninstalls are compared with the first snapshot too.
       - name: Residue after the held-DLL step, against the first snapshot (same allowances as the final diff)
         run: |

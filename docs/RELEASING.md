@@ -195,30 +195,52 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
 
 **Hooks** (`crates/lpk-gui/installer.nsh`):
 - The refusals: below build 19045, a message naming Windows 10 22H2; the x64 installer on an ARM64 PC, a message
-  naming the ARM64 build. Both exit with error level 1 before any file is written and before an old version is
+  naming the ARM64 build; and (R336) an install folder whose path holds `%` or `!`, which the next-logon cleanup's
+  cmd line would expand. Each exits with error level 1 before any file is written and before an old version is
   touched: in the GUI-init function (`MUI_CUSTOMFUNCTION_GUIINIT`, before the first page, so before the reinstall
-  page can run the old uninstaller) and, for silent installs, in a hidden section the hooks file defines ahead of the
-  template's, so before the WebView2 section (which could download Microsoft's bootstrapper) and before `SetOutPath`
-  creates the install folder. PREINSTALL repeats them and then removes the install folder only when it is empty. The
-  template sets no `ManifestSupportedOS`, so NSIS's default (every version up to Windows 10/11) is in the manifest and
-  `${AtLeastBuild}` sees the real build. CI has no Windows 10 runner: the version refusal is checked by hand on a
-  Windows 10 VM in E7-10; the ARM64 refusal runs on `windows-11-arm`.
-- PREINSTALL also cancels any LitePack `RunOnce` command still pending from an earlier uninstall or upgrade, so none
-  can touch a reinstall made before the next logon.
-- POSTINSTALL: `lpk-gui.exe --register-shell` (route C, the `.lpk` association, `GuiPath`, `bin\` on `Path`; docs/API.md;
-  an install path containing `%` or `;` is refused), a `WM_SETTINGCHANGE` broadcast for `Environment` (NSIS's
-  `SendMessage` with a 5-second timeout), and the removal of other versions' `shell\` folders.
+  page can run the old uninstaller) and in a hidden section the hooks file defines ahead of the template's, which
+  runs in silent and interactive installs alike after the folder is chosen, before the WebView2 section (which could
+  download Microsoft's bootstrapper) and before `SetOutPath` creates the install folder. PREINSTALL repeats them and
+  then removes the install folder only when it is empty. The template sets no `ManifestSupportedOS`, so NSIS's
+  default (every version up to Windows 10/11) is in the manifest and `${AtLeastBuild}` sees the real build. CI has no
+  Windows 10 runner: the version refusal is checked by hand on a Windows 10 VM in E7-10; the ARM64 refusal runs on
+  `windows-11-arm`. (`--register-shell` also refuses `%` and `;`, later.)
+- PREINSTALL then runs the "close LitePack" check (as the uninstaller does, below), and sets `bin\`'s executables
+  aside (R334, R336): Windows refuses to overwrite a running executable (an `lpk.exe` compressing during an upgrade;
+  NSIS's `File` would then skip it in a silent install, leaving a half-updated `bin\`) but lets it be renamed. Each
+  existing `bin\<name>.exe` is renamed to `<name>.exe.old-<n>` (the first free `n`) before any file is written. If a
+  rename fails, the others are renamed back (each checked; a failed one is named in the message) and the installer
+  exits with error level 2. The set-aside copies are deleted only in POSTINSTALL, once all four new executables
+  exist; if one is missing (its `File` failed), its copy is renamed back and the installer exits with error level 2
+  naming it. A held copy stays until the next install or the uninstall deletes it (`bin\lpk*.exe.old-*`, a pattern
+  no user file of a `/D=` folder's `bin\` is expected to match).
+- PREINSTALL also cancels every `LitePack *` `RunOnce` value still pending from an earlier uninstall or upgrade, so
+  none can touch a reinstall made before the next logon.
+- POSTINSTALL: the set-aside copies (above), then `lpk-gui.exe --register-shell` (route C, the `.lpk` association,
+  `GuiPath`, `bin\` on `Path`; docs/API.md), a `WM_SETTINGCHANGE` broadcast for `Environment` (NSIS's `SendMessage`
+  with a 5-second timeout), and the removal of other versions' `shell\` folders.
 - PREUNINSTALL, skipped under `/UPDATE`: the "close LitePack" check first (a cancelled prompt leaves LitePack installed
-  and registered), then `--unregister-shell`, the broadcast, `bin\lpk-worker.exe --remove-profile`.
+  and registered), then `--unregister-shell`, the broadcast, `bin\lpk-worker.exe --remove-profile`, and (R336) each
+  `bin\` executable that cannot be deleted because it still runs is renamed aside as at an upgrade.
 - POSTUNINSTALL, skipped under `/UPDATE`: `%LOCALAPPDATA%\org.litepack.gui` always; `%APPDATA%\LitePack` only with the
   box; Tauri's bookkeeping (`HKCU\Software\litepack\LitePack`, its `Installer Language`) always. The registry compares
   names without case, so that key is `Software\LitePack\LitePack`, under LitePack's own `Software\LitePack`: it is
   deleted, then `Software\LitePack` only when empty.
-- A shell DLL Explorer still holds (an old version's at an upgrade, this version's at an uninstall) is removed at the
-  next logon by a per-user `RunOnce` command that deletes `shell\<version>\lpk_shell.dll` and then removes
-  `shell\<version>`, `shell` and the install folder only if each is empty: never recursively, so nothing else in a
-  `/D=` folder can go. CI holds the DLL open during an uninstall, checks the command, runs it, and checks that a
-  reinstall cancels it.
+- The next-logon cleanup (R329, R335, R336). What a running process still holds is removed at the next logon by a
+  per-user `RunOnce` value. Windows runs a Run/RunOnce command of at most 260 characters and documents neither the
+  order of the values nor that one finishes before the next starts, so each cleanup is one value whose single cmd
+  line (`cmd /d /v:off /c`) changes to the install folder once and runs its steps in sequence with relative paths;
+  the design does not depend on the order of values. `LitePack uninstall` (after an uninstall: this version's shell
+  DLL Explorer holds, set-aside executables still running): `cd /d "<install>" && (del /f /q
+  shell\<version>\lpk_shell.dll bin\lpk*.exe.old-* & rmdir shell\<version> & rmdir shell & rmdir bin & cd .. & rmdir
+  "<folder name>")`. `LitePack shell <version>` (after an upgrade: an old version's DLL Explorer holds): the DLL, then
+  `rmdir shell\<version>`. Never recursively, so nothing else in a `/D=` folder can go; nothing runs if the folder is
+  gone. The whole stored string is measured: an install path long enough to push it past 260 characters gets no value
+  at all, and what is left stays until the next install, whose cleanup deletes `bin\lpk*.exe.old-*` and other
+  versions' `shell\` folders (after an uninstall with no later install, it stays). CI holds the DLL open during an
+  uninstall and runs an uninstall while `bin\lpk.exe` compresses; it lists the values with `scripts/e7-runonce.py`,
+  requires each to be at most 260 characters, runs them as the next logon would (in a seeded random order), requires
+  the install folder gone, and checks that a reinstall cancels them.
 
 **Switches.** Tauri's: `/S` silent (installer and uninstaller), `/P` passive (a progress bar), `/NS` no shortcuts,
 `/D=<dir>` (last and unquoted), `/R` relaunch after a silent or passive install; `/UPDATE` and `/ARGS` are the
@@ -230,7 +252,12 @@ updater's (under `/UPDATE` the old uninstaller does not run, the new files overw
 with `version` 0.0.2 and `shell/0.0.2`), snapshots, installs N with `/S` and checks the layout, the notices, the
 Uninstall key, `Path` and route C (`scripts/e7-installer-check.py`, read-only), opens a `.lpk` and a `.zip` in the
 installed GUI (the profile required), runs `bin\lpk.exe` on the `.zip`, installs N+1 with `/S` while `bin\lpk.exe`
-runs (the outcome is printed), checks N+1's registration and a single `Path` entry, uninstalls with `/S`, and diffs
+compresses about 256 MiB of generated text with `--balanced --threads 1` (the step fails if it has exited before the
+upgrade begins; it then requires exit code 0, every installed binary N+1's by hash, the running one set aside as
+`lpk.exe.old-1` while it still runs when the upgrade ends, and the running `lpk.exe`'s own exit code 0 and an
+archive that `lpk t` accepts; the `.sha256` files are read by `scripts/e7-sha256.py`, which accepts Git Bash's `*`
+marker and fails loudly on a missing name), checks N+1's registration and a single `Path` entry, uninstalls with
+`/S`, and diffs
 against the first snapshot with `--allow-settings` and the profile not allowed. A second install and uninstall with
 `/DELETEAPPDATA` requires `%APPDATA%\LitePack` gone and nothing left but Windows' entries and the copy below.
 `--run-folder` names the install folder, so the entries keyed by `lpk-gui.exe`'s path (MuiCache, and Explorer's
