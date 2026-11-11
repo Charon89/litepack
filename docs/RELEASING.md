@@ -178,8 +178,10 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
   line (`cmd /d /v:off /c`) changes to the install folder once and runs its steps in sequence with relative paths;
   the design does not depend on the order of values. `LitePack uninstall` (after an uninstall: this version's shell
   DLL Explorer holds, set-aside executables still running): `cd /d "<install>" && (del /f /q
-  shell\<version>\lpk_shell.dll bin\lpk*.exe.old-* & rmdir shell\<version> & rmdir shell & rmdir bin & cd .. & rmdir
-  "<folder name>")`. `LitePack shell <version>` (after an upgrade: an old version's DLL Explorer holds): the DLL, then
+  shell\<version>\lpk_shell.dll & del /f /q "bin\lpk.exe.old-1" & ... & rmdir shell\<version> & rmdir shell & rmdir
+  bin & cd .. & rmdir "<folder name>")`, one `del` per file that is there, by its exact name (R343: given several
+  names, `del` stopped at a missing one and deleted none, CI run 42944220039); only when the names would pass 260
+  characters is the set-aside group one `del /f /q bin\lpk*.exe.old-*`. `LitePack shell <version>` (after an upgrade: an old version's DLL Explorer holds): the DLL, then
   `rmdir shell\<version>`. Never recursively, so nothing else in a `/D=` folder can go; nothing runs if the folder is
   gone. The whole stored string is measured. The budget (R338): `LitePack uninstall` has a fixed part of 184
   characters at version 0.0.1, counting `cmd.exe`'s path and the install folder's last name `LitePack`, so the

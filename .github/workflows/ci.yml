@@ -763,6 +763,40 @@ jobs:
           lpk_rc=0; wait "$pid" || lpk_rc=$?
           echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running2.log"
           test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the uninstall"; exit 1; }
+          # R343: the next logon comes long after the process ended. Wait (at most 30 s) until every set-aside file
+          # can be opened for writing, which Windows refuses while its image is still mapped.
+          python -I -c "
+          import glob, os, sys, time
+          files = glob.glob(os.path.join(sys.argv[1], 'bin', 'lpk*.exe.old-*'))
+          end = time.time() + 30
+          for f in files:
+              while True:
+                  try:
+                      open(f, 'r+b').close()
+                      print('deletable:', f, flush=True)
+                      break
+                  except OSError as e:
+                      if time.time() > end:
+                          sys.exit(f'still held after 30 s: {f} ({e})')
+                      time.sleep(0.5)
+          " "$INST"
+          # R343's diagnosis of run 42944220039 (the old command left lpk.exe.old-1): its `del`, alone, on a copy of
+          # the folder (no shell\, bin\lpk.exe.old-1), then each name alone; each with its output and exit code.
+          python -I -c "
+          import os, shutil, subprocess, sys
+          src, d = sys.argv[1], sys.argv[2]
+          for args in ([r'shell\0.0.1\lpk_shell.dll', r'bin\lpk*.exe.old-*'], [r'bin\lpk*.exe.old-*'],
+                       [r'bin\lpk.exe.old-1']):
+              shutil.rmtree(d, ignore_errors=True)
+              os.makedirs(os.path.join(d, 'bin'))
+              shutil.copy(os.path.join(src, 'bin', 'lpk.exe.old-1'), os.path.join(d, 'bin', 'lpk.exe.old-1'))
+              cmd = 'del /f /q ' + ' '.join(args)
+              p = subprocess.run(['cmd.exe', '/d', '/v:off', '/c', cmd], cwd=d, capture_output=True, text=True)
+              left = os.path.exists(os.path.join(d, 'bin', 'lpk.exe.old-1'))
+              print(f'diagnosis: {cmd!r}: exit {p.returncode}, output {(p.stdout + p.stderr).strip()!r}, '
+                    f'lpk.exe.old-1 {\"left\" if left else \"deleted\"}')
+          shutil.rmtree(d, ignore_errors=True)
+          " "$INST" "$W/del-diag"
           python -I scripts/e7-runonce.py run
           test ! -e "$INST" || { ls -laR "$INST"; echo "the RunOnce command left $INST"; exit 1; }
           test -z "$(python -I scripts/e7-runonce.py show)" || { echo "RunOnce values left after the run"; exit 1; }
