@@ -61,7 +61,9 @@ in `crates/lpk-gui`). They are unsigned until E7-1 to E7-3 land.
 - `litepack-<version>-windows-<arch>-cli.zip` holds the same files without `lpk-gui.exe` and the marker, with its own
   `README.txt` (no settings, no network).
 - Both READMEs name the one footprint outside the folder: the `LitePack.Worker` AppContainer profile, created when a
-  foreign archive is first opened and removed by `lpk-worker.exe --remove-profile`.
+  foreign archive is first opened and removed by `lpk-worker.exe --remove-profile`; the portable README also names
+  the GUI's About box button "Remove the sandbox profile" (Settings, then About LitePack), which calls the same
+  delete in process and is refused while an operation runs.
 - Both are deterministic (R293): entries sorted, one timestamp for all of them (CI passes the commit's,
   `git log -1 --format=%ct`), fixed MS-DOS attributes, Deflate at level 9 through Python's `zipfile`. The bytes are
   identical for one Python build only, since its zlib and its `zipfile` shape them: CI pins Python 3.13.7 through
