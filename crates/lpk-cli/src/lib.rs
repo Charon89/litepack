@@ -212,7 +212,10 @@ below it: `docs` selects `docs/b.md` and `docs/deep/r.bin`, `**/*.jpg` every JPE
 blocks the selected entries need are decoded; the directories a selected path implies are \
 created. A pattern that matches no entry is refused before any output (exit 2, naming it). An \
 existing file is refused unless --overwrite says otherwise; symlink entries are skipped \
-unless --symlinks is given.";
+unless --symlinks is given. Directories the extraction creates get the time and attributes \
+their entries carry, once every file is written; a directory where that fails keeps the ones \
+it had when created, and the command prints one warning with their count (with --json one \
+`{\"warning\":{\"kind\":\"DirsUnset\",\"count\":N}}` line).";
 
 /// The long help of `l`: the columns and the keys of a `--json` line.
 const LIST_ABOUT: &str = "\

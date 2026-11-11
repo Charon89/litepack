@@ -403,6 +403,8 @@ impl Tree {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+                #[cfg(test)]
+                seam::after_dir_check(path);
                 let f = std::fs::OpenOptions::new()
                     .read(true)
                     .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK)
@@ -650,6 +652,7 @@ pub(crate) mod seam {
     thread_local! {
         static BEFORE_CREATE: RefCell<Option<Hook>> = RefCell::new(None);
         static BEFORE_OPEN_DIR: RefCell<Option<Hook>> = RefCell::new(None);
+        static AFTER_DIR_CHECK: RefCell<Option<Hook>> = RefCell::new(None);
         static PRIVILEGE: Cell<Option<bool>> = const { Cell::new(None) };
         static MAX_HELD: Cell<Option<usize>> = const { Cell::new(None) };
         static REFUSE_FINISH_DIR: Cell<bool> = const { Cell::new(false) };
@@ -685,6 +688,22 @@ pub(crate) mod seam {
     /// (every system).
     pub(crate) fn on_before_open_dir(f: Option<Hook>) {
         BEFORE_OPEN_DIR.with(|h| *h.borrow_mut() = f);
+    }
+
+    /// Call `f` with a directory's full path in the directory pass on Unix, after the check
+    /// that it is a directory (not a link) and before its `O_NOFOLLOW` open.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn on_after_dir_check(f: Option<Hook>) {
+        AFTER_DIR_CHECK.with(|h| *h.borrow_mut() = f);
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn after_dir_check(p: &Path) {
+        AFTER_DIR_CHECK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(p);
+            }
+        });
     }
 
     pub(crate) fn before_create(p: &Path) {

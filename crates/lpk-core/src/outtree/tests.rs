@@ -92,6 +92,7 @@ impl Drop for Reset {
         seam::force_symlink_privilege(None);
         seam::force_max_held(None);
         seam::refuse_finish_dir(false);
+        seam::on_after_dir_check(None);
         #[cfg(windows)]
         lpk_fs_sys::set_share_delete_for_tests(false);
     }
@@ -731,6 +732,56 @@ fn a_link_swapped_in_during_the_directory_pass_is_never_opened() {
     std::fs::remove_dir(out.join("d")).unwrap();
     #[cfg(unix)]
     std::fs::remove_file(out.join("d")).unwrap();
+}
+
+/// Unix: directories swapped after the pass's `lstat` check and before its open, `a` for a
+/// symlink to an outside directory (the `O_NOFOLLOW` open refuses it) and `b` for another
+/// real directory (the inode check after the open refuses it): the extraction succeeds, the
+/// outside directory and the stand-in keep their times, and both are counted in `dirs_unset`.
+#[cfg(unix)]
+#[test]
+fn directories_swapped_between_the_check_and_the_open_are_never_set() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let _reset = Reset;
+    let work = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("canary.txt"), b"canary").unwrap();
+    let before = dir_state(outside.path());
+    let out = work.path().join("out");
+    let bytes = pack(|w| {
+        for d in ["a", "b"] {
+            w.add_directory(d, EntryFlags::EMPTY, 2_000_000_000)
+                .unwrap();
+            w.add_file(&format!("{d}/f.txt"), EntryFlags::EMPTY, 0, &mut &b"in"[..])
+                .unwrap();
+        }
+    });
+    let (o, t) = (out.clone(), outside.path().to_path_buf());
+    let swaps = Rc::new(Cell::new(0));
+    let n = Rc::clone(&swaps);
+    seam::on_after_dir_check(Some(Box::new(move |p: &Path| {
+        if p.ends_with("a") {
+            std::fs::rename(o.join("a"), o.join("a-moved")).unwrap();
+            std::os::unix::fs::symlink(&t, o.join("a")).unwrap();
+            n.set(n.get() + 1);
+        } else if p.ends_with("b") {
+            std::fs::rename(o.join("b"), o.join("b-moved")).unwrap();
+            std::fs::create_dir(o.join("b")).unwrap();
+            n.set(n.get() + 1);
+        }
+    })));
+    let s = extract(&bytes, &out, &Policy::default()).unwrap();
+    assert_eq!(swaps.get(), 2);
+    assert_eq!(s.dirs_unset, 2);
+    assert_eq!(s.files, 2);
+    assert_eq!(dir_state(outside.path()), before);
+    assert_eq!(listing(outside.path()), ["canary.txt"]);
+    let two = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2);
+    assert_ne!(dir_state(&out.join("b")).0, two);
+    assert_eq!(std::fs::read(out.join("a-moved/f.txt")).unwrap(), b"in");
+    assert_eq!(std::fs::read(out.join("b-moved/f.txt")).unwrap(), b"in");
+    std::fs::remove_file(out.join("a")).unwrap();
 }
 
 /// A directory whose time and attributes are refused (the test seam, as a volume or a filter
