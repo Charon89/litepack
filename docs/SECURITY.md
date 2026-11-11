@@ -152,3 +152,9 @@ without named streams gives one warning (D-119).
 The policy and the way to report are in the root `SECURITY.md`. Report privately, through GitHub's "Report a
 vulnerability" button on the repository's Security tab (private vulnerability reporting), never in a public issue,
 pull request or discussion.
+
+Extraction on Unix (E2-19's parked items): the directory pass that sets an extracted directory's time opens it
+with `O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK` and checks the inode, and touches only directories the extraction
+created; the parent chain above it is not checked on Unix (the plan's linked-parent check, made once before
+writing, is the guard; opening relative to verified directory handles there is a parked item). On Windows every
+directory is opened relative to its held, verified parent.

@@ -212,7 +212,10 @@ below it: `docs` selects `docs/b.md` and `docs/deep/r.bin`, `**/*.jpg` every JPE
 blocks the selected entries need are decoded; the directories a selected path implies are \
 created. A pattern that matches no entry is refused before any output (exit 2, naming it). An \
 existing file is refused unless --overwrite says otherwise; symlink entries are skipped \
-unless --symlinks is given.";
+unless --symlinks is given. Directories the extraction creates get the time and attributes \
+their entries carry, once every file is written; a directory where that fails keeps the ones \
+it had when created, and the command prints one warning with their count (with --json one \
+`{\"warning\":{\"kind\":\"DirsUnset\",\"count\":N}}` line).";
 
 /// The long help of `l`: the columns and the keys of a `--json` line.
 const LIST_ABOUT: &str = "\
@@ -318,7 +321,8 @@ impl CredentialArgs {
         };
         let keyfile = match &self.keyfile {
             Some(f) => {
-                let bytes = std::fs::read(f).map_err(|e| unreadable(f, e))?;
+                // Wiped if a later step (the keyfile check, the password read) fails.
+                let bytes = Zeroizing::new(std::fs::read(f).map_err(|e| unreadable(f, e))?);
                 if purpose == Use::Open {
                     check_keyfile_needed(archive)?;
                 }
@@ -352,7 +356,7 @@ impl CredentialArgs {
             (None, None) => None,
             (p, keyfile) => Some(Credentials {
                 password: p.map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
-                keyfile,
+                keyfile: keyfile.map(|mut k| std::mem::take(&mut *k)),
             }),
         })
     }
@@ -1004,6 +1008,26 @@ fn motw_warning(zone: Option<lpk_core::motw::Zone>, json: bool, err: &mut dyn Wr
         let _ = writeln!(err, "{line}");
     } else {
         let _ = writeln!(err, "warning: {}", lpk_core::motw::unmarked_warning(z));
+    }
+}
+
+/// Directories the extraction created whose time or attributes could not be set (E2-19):
+/// one line, `warning: N directories kept the times or attributes they had when created`,
+/// or with --json `{"warning":{"kind":"DirsUnset","count":N}}`; nothing when there are none.
+fn dirs_unset_warning(s: &lpk_core::ExtractSummary, json: bool, err: &mut dyn Write) {
+    let n = s.dirs_unset;
+    if n == 0 {
+        return;
+    }
+    if json {
+        let line = serde_json::json!({ "warning": { "kind": "DirsUnset", "count": n } });
+        let _ = writeln!(err, "{line}");
+    } else {
+        let noun = if n == 1 { "directory" } else { "directories" };
+        let _ = writeln!(
+            err,
+            "warning: {n} {noun} kept the times or attributes they had when created"
+        );
     }
 }
 
@@ -1756,6 +1780,7 @@ fn extract(
     }
     unprivileged_warnings(&report.unprivileged_symlinks, json, err);
     refused_target_warnings(&report.refused_symlink_targets, json, err);
+    dirs_unset_warning(&s, json, err);
     if json {
         if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
             let line = serde_json::json!({
@@ -2329,6 +2354,37 @@ fn dispatch(
                 export(&x, c, json, console, out, err)
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod dirs_unset_tests {
+    fn line(n: u64, json: bool) -> String {
+        let s = lpk_core::ExtractSummary {
+            dirs_unset: n,
+            ..lpk_core::ExtractSummary::default()
+        };
+        let mut err = Vec::new();
+        super::dirs_unset_warning(&s, json, &mut err);
+        String::from_utf8_lossy(&err).into_owned()
+    }
+
+    #[test]
+    fn the_dirs_unset_warning_counts_directories() {
+        assert_eq!(line(0, false), "");
+        assert_eq!(line(0, true), "");
+        assert_eq!(
+            line(1, false),
+            "warning: 1 directory kept the times or attributes they had when created\n"
+        );
+        assert_eq!(
+            line(3, false),
+            "warning: 3 directories kept the times or attributes they had when created\n"
+        );
+        assert_eq!(
+            line(2, true).trim_end(),
+            r#"{"warning":{"count":2,"kind":"DirsUnset"}}"#
+        );
     }
 }
 
