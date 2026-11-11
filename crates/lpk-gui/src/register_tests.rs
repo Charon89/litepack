@@ -400,6 +400,22 @@ fn a_percent_sign_in_the_install_path_is_refused_before_any_write() {
 }
 
 #[test]
+fn a_semicolon_in_the_install_path_is_refused_before_any_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("a;b").join("LitePack");
+    std::fs::create_dir_all(sub.join(BIN_DIR)).unwrap();
+    std::fs::write(sub.join(SHELL_DLL), b"").unwrap();
+    std::fs::write(sub.join(BIN_DIR).join(BIN_TOOL), b"").unwrap();
+    let exe = sub.join("lpk-gui.exe");
+    std::fs::write(&exe, b"").unwrap();
+    let mut reg = Fake::default();
+    let verb = ShellVerb::Register { open_with: false };
+    assert_eq!(run_verb(verb, &exe, &mut reg), exit::REFUSED);
+    assert_eq!(reg.writes, 0);
+    assert_eq!(reg.notifies, 0);
+}
+
+#[test]
 fn verbatim_prefixes_are_normalized() {
     assert_eq!(normalize_path("C:\\a\\b.exe"), "C:\\a\\b.exe");
     assert_eq!(normalize_path("\\\\?\\C:\\a\\b.exe"), "C:\\a\\b.exe");
@@ -496,4 +512,372 @@ fn the_open_with_list_is_parsed() {
     assert!(l
         .iter()
         .all(|e| !e.is_empty() && !e.contains('.') && *e == e.to_lowercase()));
+}
+
+#[test]
+fn path_entries_are_appended_once_and_removed_by_value() {
+    let bin = "C:\\Users\\u\\AppData\\Local\\LitePack\\bin";
+    // A separator only when one is needed; a duplicate (any case, a trailing backslash) is not
+    // added.
+    assert_eq!(path_with_entry("", bin), Some((bin.to_string(), false)));
+    assert_eq!(
+        path_with_entry("A;B", bin),
+        Some((format!("A;B;{bin}"), true))
+    );
+    assert_eq!(
+        path_with_entry("A;", bin),
+        Some((format!("A;{bin}"), false))
+    );
+    let upper = format!("A;{}\\;B", bin.to_uppercase());
+    assert_eq!(path_with_entry(&upper, bin), None);
+    // Removed exactly, the rest byte for byte.
+    for before in ["", "A;B", "A;", "%X%\\y;;Z", ";"] {
+        let (with, sep) = path_with_entry(before, bin).unwrap();
+        assert_eq!(path_without_entry(&with, bin, sep).as_deref(), Some(before));
+    }
+    // Something appended after ours by someone else stays.
+    let (with, sep) = path_with_entry("A", bin).unwrap();
+    assert_eq!(
+        path_without_entry(&format!("{with};C"), bin, sep).as_deref(),
+        Some("A;C")
+    );
+    assert_eq!(path_without_entry("A;B", bin, true), None);
+}
+
+#[test]
+fn register_puts_bin_on_path_keeping_its_type_and_unregister_restores_it() {
+    let bin = "C:\\Apps\\LitePack\\bin";
+    let found = [
+        RegValue::ExpandSz("%USERPROFILE%\\.cargo\\bin;C:\\Tools".to_string()),
+        sz("C:\\Tools;"),
+    ];
+    for value in found {
+        let before = foreign().with(ENVIRONMENT, PATH_VALUE, value.clone());
+        let mut reg = before.clone();
+        register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+        let after = reg.value(ENVIRONMENT, PATH_VALUE).unwrap();
+        match (&value, &after) {
+            (RegValue::ExpandSz(a), RegValue::ExpandSz(b)) | (RegValue::Sz(a), RegValue::Sz(b)) => {
+                assert!(b.starts_with(a.as_str()) && b.ends_with(bin), "{b}");
+            }
+            _ => panic!("type changed: {after:?}"),
+        }
+        // Registering again (an upgrade, the settings toggle) leaves one entry.
+        register_with_path(&mut reg, GUI, DLL, Some(bin), true).unwrap();
+        assert_eq!(reg.value(ENVIRONMENT, PATH_VALUE), Some(after));
+        unregister(&mut reg).unwrap();
+        assert_eq!(reg.snapshot(), before.snapshot());
+    }
+    // An entry already there (the user's) is neither added nor removed.
+    let mine = foreign().with(ENVIRONMENT, PATH_VALUE, sz("C:\\apps\\litepack\\BIN\\"));
+    let mut reg = mine.clone();
+    register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+    assert_eq!(
+        reg.value(ENVIRONMENT, PATH_VALUE),
+        Some(sz("C:\\apps\\litepack\\BIN\\"))
+    );
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), mine.snapshot());
+    // No `Path` and no `Environment`: created, then removed with the key.
+    let mut reg = Fake::default();
+    register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+    assert_eq!(
+        reg.value(ENVIRONMENT, PATH_VALUE),
+        Some(RegValue::ExpandSz(bin.to_string()))
+    );
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), Fake::default().snapshot());
+    // A `Path` that is not a string is left as found.
+    let odd = foreign().with(ENVIRONMENT, PATH_VALUE, RegValue::Other(3));
+    let mut reg = odd.clone();
+    register_with_path(&mut reg, GUI, DLL, Some(bin), false).unwrap();
+    assert_eq!(reg.value(ENVIRONMENT, PATH_VALUE), Some(RegValue::Other(3)));
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), odd.snapshot());
+}
+
+#[test]
+fn a_failure_while_adding_to_path_is_undone_by_unregister() {
+    let before = foreign().with(ENVIRONMENT, PATH_VALUE, sz("A"));
+    let mut n = 0;
+    loop {
+        let mut reg = before.clone();
+        reg.fail_at = Some(n);
+        let failed = register_with_path(&mut reg, GUI, DLL, Some("C:\\L\\bin"), true).is_err();
+        reg.fail_at = None;
+        unregister(&mut reg).unwrap();
+        assert_eq!(reg.snapshot(), before.snapshot(), "failure after write {n}");
+        if !failed {
+            break;
+        }
+        n += 1;
+    }
+    assert!(n > 10, "{n}");
+}
+
+#[test]
+fn the_installed_layout_registers_its_versioned_dll_and_bin() {
+    let (dir, exe) = install(false, true);
+    // Development layout: the DLL beside the exe, no `bin`.
+    assert_eq!(shell_dll_path(dir.path()), dir.path().join(SHELL_DLL));
+    assert_eq!(installed_bin(dir.path()), None);
+    // A folder of another version is not ours.
+    let other = dir.path().join(SHELL_DIR).join("0.0.0-other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(SHELL_DLL), b"").unwrap();
+    assert_eq!(shell_dll_path(dir.path()), dir.path().join(SHELL_DLL));
+    // Installed layout: `shell\<version>\lpk_shell.dll` and `bin\lpk.exe`.
+    let versioned = dir.path().join(SHELL_DIR).join(APP_VERSION);
+    std::fs::create_dir_all(&versioned).unwrap();
+    std::fs::write(versioned.join(SHELL_DLL), b"").unwrap();
+    let bin = dir.path().join(BIN_DIR);
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join(BIN_TOOL), b"").unwrap();
+    std::fs::remove_file(dir.path().join(SHELL_DLL)).unwrap();
+    assert_eq!(shell_dll_path(dir.path()), versioned.join(SHELL_DLL));
+    assert_eq!(installed_bin(dir.path()), Some(bin.clone()));
+    let mut reg = Fake::default();
+    register_for(&exe, false, &mut reg).unwrap();
+    let inproc = format!("{CLASSES}\\CLSID\\{CLASSIC_CLSID}\\InProcServer32");
+    assert_eq!(
+        reg.value(&inproc, ""),
+        Some(sz(versioned.join(SHELL_DLL).to_str().unwrap()))
+    );
+    assert_eq!(
+        reg.value(ENVIRONMENT, PATH_VALUE),
+        Some(RegValue::ExpandSz(bin.to_str().unwrap().to_string()))
+    );
+    unregister(&mut reg).unwrap();
+    assert_eq!(reg.snapshot(), Fake::default().snapshot());
+    // A portable copy of the installed layout still refuses.
+    std::fs::write(dir.path().join(PORTABLE_MARKER), b"").unwrap();
+    assert!(matches!(
+        register_for(&exe, false, &mut reg),
+        Err(RegisterError::Refused(_))
+    ));
+}
+
+#[test]
+fn the_app_version_is_the_tauri_config_version() {
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    // Built without an overlay (cargo test sets no TAURI_CONFIG).
+    assert_eq!(conf["version"].as_str(), Some(APP_VERSION));
+}
+
+#[test]
+fn the_uninstaller_removes_the_jump_list_of_this_identifier() {
+    // Windows names an app's jump list files by the CRC-64 (polynomial 0x92C64265D32139A4,
+    // reflected, initial value all ones) of its AppUserModelID, upper-cased, in UTF-16LE.
+    fn crc64(data: &[u8]) -> u64 {
+        let mut c = u64::MAX;
+        for &b in data {
+            c ^= u64::from(b);
+            for _ in 0..8 {
+                c = if c & 1 == 1 {
+                    (c >> 1) ^ 0x92C6_4265_D321_39A4
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        c
+    }
+    let explorer: Vec<u8> = "MICROSOFT.WINDOWS.EXPLORER"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(format!("{:016x}", crc64(&explorer)), "f01b4d95cf55d32a");
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let id: Vec<u8> = conf["identifier"]
+        .as_str()
+        .unwrap()
+        .to_uppercase()
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let file = format!("{:016x}.automaticDestinations-ms", crc64(&id));
+    assert!(include_str!("../installer.nsh").contains(&file), "{file}");
+}
+
+#[test]
+fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
+    let nsh = include_str!("../installer.nsh");
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let product = conf["productName"].as_str().unwrap();
+    let exe = format!("{}.exe", conf["mainBinaryName"].as_str().unwrap());
+    assert!(nsh.contains(&format!("!define LPK_PRODUCT \"{product}\"")));
+    assert!(nsh.contains(&format!("!define LPK_MAIN_EXE \"{exe}\"")));
+    // R329, R335, R336: each RunOnce value is one cmd line that changes to $INSTDIR once (`&&`: nothing runs if it
+    // is gone) and then runs its steps in sequence with relative paths: deletes of LitePack's own files only (the
+    // shell DLL; bin\'s set-aside `lpk*.exe.old-*`), then non-recursive rmdirs. No delayed expansion.
+    assert!(nsh.contains(r#"!define LPK_CMD '"$SYSDIR\cmd.exe" /d /v:off /c'"#));
+    let commands: Vec<String> = nsh
+        .lines()
+        .filter_map(|l| l.split("'${LPK_CMD} ").nth(1))
+        .map(|a| a.trim_end().trim_end_matches('\'').to_lowercase())
+        .collect();
+    assert_eq!(commands.len(), 3, "{commands:?}");
+    // R343: the uninstall command's deletes are built in $R1, one `del` per exact file name (the wildcard only as
+    // the fallback when the names would pass 260 characters).
+    let files = [
+        r"shell\${version}\lpk_shell.dll",
+        r#""bin\$1""#,
+        r"bin\lpk*.exe.old-*",
+    ];
+    let builds: Vec<String> = nsh
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("StrCpy $R1 '"))
+        .map(|b| b.trim_end_matches('\'').to_lowercase())
+        .collect();
+    assert_eq!(builds.len(), 3, "{builds:?}");
+    for b in &builds {
+        let b = b.strip_prefix("$r1").unwrap_or(b);
+        let dels: Vec<&str> = b.split(" & ").filter(|d| !d.is_empty()).collect();
+        assert!(!dels.is_empty(), "{b}");
+        for d in dels {
+            let f = d.strip_prefix("del /f /q ").expect(d);
+            assert!(files.contains(&f), "{f}");
+        }
+    }
+    for cmd in &commands {
+        assert!(!cmd.contains("/s"), "{cmd}");
+        let body = cmd
+            .strip_prefix(r#"cd /d "$r3" && ("#)
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{cmd}"));
+        let mut parts: Vec<&str> = body.split(" & ").collect();
+        if let Some(rest) = parts[0].strip_prefix("$r1") {
+            parts[0] = rest;
+        } else {
+            let f = parts.remove(0).strip_prefix("del /f /q ").expect(cmd);
+            assert!(files.contains(&f), "{f}");
+        }
+        for part in parts {
+            assert!(part == "cd .." || part.starts_with("rmdir "), "{part}");
+            assert!(!part.contains(':') && !part.contains("$instdir"), "{part}");
+        }
+    }
+    // The whole stored string is measured, and nothing is written past 260 or for a path holding `%` or `!`.
+    let write = nsh
+        .split("!macro LPK_RUNONCE_WRITE")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    let at = |s: &str| write.find(s).unwrap_or_else(|| panic!("{s}"));
+    assert!(at("LPK_FIND_CMD_CHAR") < at("WriteRegStr"));
+    assert!(at("StrLen $R6 $R8") < at("WriteRegStr"));
+    assert!(at("${If} $R6 <= 260") < at("${AndIf} $R7 == \"\""));
+    // R338: the full path first ($R3 = $INSTDIR), then its short form when the full string is over 260.
+    assert!(at("StrCpy $R3 $INSTDIR") < at("${If} $R6 > 260"));
+    assert!(at("${If} $R6 > 260") < at("GetFullPathName /SHORT $R3 $INSTDIR"));
+    assert!(at("GetFullPathName /SHORT $R3 $INSTDIR") < at("${If} $R6 <= 260"));
+    assert!(at("${AndIf} $R7 == \"\"") < at("WriteRegStr"));
+    assert_eq!(
+        nsh.matches("WriteRegStr HKCU \"${LPK_RUNONCE}\"").count(),
+        1
+    );
+    // The refusals include a path holding `%` or `!` (LPK_REFUSE: GUI init, the first section, PREINSTALL).
+    let refuse = nsh.split("!macro LPK_REFUSE").nth(1).unwrap();
+    assert!(refuse
+        .trim_start()
+        .starts_with("remove\n  !insertmacro LPK_FIND_CMD_CHAR"));
+    // A reinstall cancels every `LitePack *` value before the next logon could remove the new installation's files.
+    let cancel = nsh
+        .split("!macro LPK_CANCEL_PENDING_RUNONCE")
+        .nth(1)
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap();
+    assert!(cancel.contains("StrCpy $R7 $R6 9"));
+    assert!(cancel.contains(r#"${If} $R7 == "LitePack ""#));
+}
+
+fn nsh_macro<'a>(nsh: &'a str, name: &str) -> &'a str {
+    nsh.split(&format!("!macro {name}\n"))
+        .nth(1)
+        .or_else(|| nsh.split(&format!("!macro {name} ")).nth(1))
+        .and_then(|s| s.split("!macroend").next())
+        .unwrap_or_else(|| panic!("{name}"))
+}
+
+#[test]
+fn an_upgrade_sets_every_bin_executable_aside_before_any_file_is_written() {
+    // R334, R336: Windows refuses to overwrite a running executable but allows a rename, so PREINSTALL renames each of
+    // bin\'s executables the overlay installs (tauri.nsis.conf.json) to <name>.old-<n> after the running check and
+    // before the RunOnce values are cancelled; the copies are deleted only in POSTINSTALL, once the new files exist;
+    // the uninstaller sets running ones aside the same way.
+    let nsh = include_str!("../installer.nsh");
+    let conf: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.nsis.conf.json")).unwrap();
+    let mut bin: Vec<String> = conf["bundle"]["resources"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|v| v.as_str()?.strip_prefix("bin/").map(str::to_owned))
+        .collect();
+    bin.sort();
+    let named = |body: &str, call: &str| {
+        let mut v: Vec<String> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(call))
+            .map(|s| s.split('"').next().unwrap().to_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let set_aside = nsh_macro(nsh, "LPK_SET_ASIDE_BIN");
+    assert_eq!(named(set_aside, "!insertmacro LPK_SET_ASIDE \""), bin);
+    assert_eq!(named(set_aside, "!insertmacro LPK_PUT_BACK \""), bin);
+    // Before the copy, only an earlier install's leftovers are deleted.
+    let deletes: Vec<&str> = set_aside.lines().filter(|l| l.contains("Delete")).collect();
+    assert_eq!(deletes, [r#"  Delete "$INSTDIR\bin\lpk*.exe.old-*""#]);
+    let finish = nsh_macro(nsh, "LPK_FINISH_SET_ASIDE");
+    assert_eq!(named(finish, "!insertmacro LPK_MISSING \""), bin);
+    assert_eq!(named(finish, "!insertmacro LPK_PUT_BACK \""), bin);
+    assert!(finish.find("LPK_MISSING").unwrap() < finish.find("LPK_DROP_SET_ASIDE").unwrap());
+    let pre = nsh_macro(nsh, "NSIS_HOOK_PREINSTALL");
+    let at = |s: &str| {
+        pre.find(s)
+            .unwrap_or_else(|| panic!("{s} not in PREINSTALL"))
+    };
+    assert!(at("Call LpkCheckRunning") < at("LPK_SET_ASIDE_BIN"));
+    assert!(at("LPK_SET_ASIDE_BIN") < at("LPK_CANCEL_PENDING_RUNONCE"));
+    assert!(nsh_macro(nsh, "NSIS_HOOK_POSTINSTALL").contains("!insertmacro LPK_FINISH_SET_ASIDE"));
+    let pre_un = nsh_macro(nsh, "NSIS_HOOK_PREUNINSTALL");
+    assert_eq!(
+        named(pre_un, "!insertmacro LPK_UNINSTALL_SET_ASIDE \""),
+        bin
+    );
+    for hook in ["NSIS_HOOK_PREUNINSTALL", "NSIS_HOOK_POSTUNINSTALL"] {
+        let body = nsh_macro(nsh, hook);
+        assert!(body.contains(r#"$INSTDIR\bin\lpk*.exe.old-*"#), "{hook}");
+        assert!(!body.contains(r#"bin\*.old"#), "{hook}");
+    }
+}
+
+#[test]
+fn the_installer_overlay_places_the_dll_in_this_versions_shell_folder() {
+    let overlay: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.nsis.conf.json")).unwrap();
+    let resources = overlay["bundle"]["resources"].as_object().unwrap();
+    let shell: Vec<&str> = resources
+        .values()
+        .filter_map(|v| v.as_str())
+        .filter(|v| v.starts_with("shell/"))
+        .collect();
+    assert_eq!(shell, [format!("shell/{APP_VERSION}/{SHELL_DLL}")]);
+    // The overlay sets no version of its own: the installer is the workspace's version.
+    assert!(overlay.get("version").is_none());
+    for tool in [
+        "lpk.exe",
+        "lpk-check.exe",
+        "lpk-worker.exe",
+        "lpk-worker-libarchive.exe",
+    ] {
+        assert!(
+            resources
+                .values()
+                .any(|v| v.as_str() == Some(&format!("bin/{tool}"))),
+            "{tool}"
+        );
+    }
 }

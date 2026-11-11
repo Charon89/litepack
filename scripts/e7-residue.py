@@ -2,15 +2,19 @@
 
     python -I scripts/e7-residue.py snapshot <out.json> [--on-ci]
     python -I scripts/e7-residue.py diff <before.json> <after.json>
-        [--allow-worker-profile | --require-worker-profile]
+        [--allow-worker-profile | --require-worker-profile] [--allow-settings]
     python -I scripts/e7-residue.py --self-test
 
 `snapshot` refuses unless GITHUB_ACTIONS=true or --on-ci is given: use it only on a disposable
 machine. Every path it cannot read is printed and recorded; `diff` reports such a path as
 residue (`?`) even when both snapshots record it alike. --require-worker-profile allows the
-profile and fails unless both its folder and its Mappings key were added.
+profile and fails unless both its folder and its Mappings key were added. --allow-settings
+(E7-5, after an uninstall without the "delete the application data" box, as
+docs/notes/e7-design.md section 3 allows) allows %APPDATA%\\LitePack\\settings.json and its folder
+when that folder holds nothing else, and nothing more.
 
-`snapshot` records every file and folder under %APPDATA% and %LOCALAPPDATA% (path, size and
+`snapshot` records every file and folder under %APPDATA% (the Start menu included),
+%LOCALAPPDATA% and the desktop, %USERPROFILE%\\Desktop (E7-5: shortcuts; recorded as `%DESKTOP%`) (path, size and
 modification time; a folder by its path alone, a link or junction by its path, never followed)
 and the keys and values of HKCU\\Software (with Classes) and HKCU\\Environment, through
 `reg.exe export` into the output's folder, parsed from UTF-16. Windows only; it holds the
@@ -25,6 +29,7 @@ is 1 if any entry is not allowed.
 """
 
 import argparse
+import codecs
 import json
 import os
 import re
@@ -41,7 +46,21 @@ WORKER_MONIKER = "LitePack.Worker"
 
 REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
 
-FILE_ROOTS = ("APPDATA", "LOCALAPPDATA")
+FILE_ROOTS = ("APPDATA", "LOCALAPPDATA", "DESKTOP")
+
+# --allow-settings: the one file an uninstall without the box leaves (e7-design section 3).
+SETTINGS_DIR = r"%APPDATA%\LitePack"
+SETTINGS_FILE = SETTINGS_DIR + r"\settings.json"
+SETTINGS_REASON = ("the GUI's settings, kept by an uninstall without the \"delete the application "
+                   "data\" box (docs/notes/e7-design.md section 3)")
+
+
+def root_dir(token):
+    """The folder a file root's token names; DESKTOP is %USERPROFILE%\\Desktop."""
+    if token == "DESKTOP":
+        profile = os.environ.get("USERPROFILE")
+        return os.path.join(profile, "Desktop") if profile else None
+    return os.environ.get(token)
 # HKCU\Software\Classes is the user's classes hive (UsrClass.dat) linked into HKCU\Software: it is
 # exported on its own as well, and `snapshot` refuses unless its `Local Settings` key (where the
 # AppContainer profiles are mapped) is in the result.
@@ -65,20 +84,33 @@ APPCONTAINER_REASON = ("Windows' own AppContainer bookkeeping: an empty parent k
 AAD_LU = (LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData"
           r"\Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy\HAM\AUI\App\V1\LU")
 SHELL_MUICACHE = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\Shell\MuiCache"
+SPOTLIGHT = r"HKCU\Software\Microsoft\Windows\CurrentVersion\DesktopSpotlight"
+SPOTLIGHT_LU = (LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData"
+                r"\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\HAM\AUI\Global.DesktopSpotlight\V1\LU")
+SPOT = "Windows Spotlight's own state, which Windows updates in the background (CI run 42944220039, R343)"
 USERASSIST_COUNT = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
                     r"\{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}\Count")
 WAM = ("written while the GUI starts, by Windows' account broker (WAM, "
        "Microsoft.AAD.BrokerPlugin), most likely for the WebView2 runtime (R315)")
 MUI = "Windows' shell cache of a program's display strings (MuiCache), filled when a program runs"
+START = "Windows' Start menu and search bookkeeping, updated when a shortcut is added or removed"
 WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for every WebView2 app "
             "(R313); LitePack's WebView2 data stays in data\\")
 
 # Kinds: `file` (the folder or file and everything under it), `file-pattern` (files directly in
 # one folder whose names match one shape), `key` (the key and everything under it), `key-only`
 # (that one key's existence, not its values or subkeys), `value` (one key and one value name),
-# `value-pattern` (one key, value names of one shape), `empty-key` (that key alone, added and
-# holding nothing).
+# `value-pattern` (one key, or with a `key` regular expression the keys it matches, value names of one
+# shape), `file-changed-pattern` (files of one folder, names of one shape, changed only), `key-pattern-value` (one value name in keys
+# of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
+# holding nothing), `file-changed` (that one file, changed only: never added or removed).
+USRCLASS = ("the storage files of HKCU\\Software\\Classes (its registry hive and transaction logs), which Windows "
+            "rewrites whenever that hive is written; the diff already examines its keys one by one (R339)")
 ALLOW = [
+    # CI run 42933006998's portable job, ruling R339.
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat", "reason": USRCLASS},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG1", "reason": USRCLASS},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG2", "reason": USRCLASS},
     # E7-6's first full diff (CI run 42483731626), ruling R313.
     {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\TokenBroker\Cache",
      "name": r"[0-9a-f]{40}\.tbres", "reason": WAM + ": its token cache, one file per token"},
@@ -91,11 +123,22 @@ ALLOW = [
      "reason": WAM + ": the broker app's last-use time"},
     {"kind": "value", "path": AAD_LU, "name": "PTT",
      "reason": WAM + ": the broker app's last-use time"},
+    {"kind": "value", "path": SPOTLIGHT, "name": "Maintenance", "reason": SPOT + ": its maintenance record"},
+    {"kind": "value", "path": SPOTLIGHT, "name": "State", "reason": SPOT + ": its state"},
+    {"kind": "value", "path": SPOTLIGHT_LU, "name": "PCT", "reason": SPOT + ": its last-use time"},
+    {"kind": "value", "path": SPOTLIGHT_LU, "name": "PTT", "reason": SPOT + ": its last-use time"},
     {"kind": "value", "path": r"HKCU\Software\Microsoft\AuthCookies\Live\Default\DIDC",
      "name": "Data", "reason": WAM + ": the Microsoft account device cookie"},
-    {"kind": "value-pattern", "path": LOCAL_SETTINGS + r"\MuiCache\1a4\52C64B7E",
-     "name": r"C:\\Windows\\system32,@elscore\.dll,-[0-9]+",
-     "reason": MUI + ": the strings of Windows' elscore.dll (Extended Linguistic Services)"},
+    # The hex subkey differs between runs (1a4, 1a7); the names must point at a DLL of Windows' own
+    # system folder (no backslash in the DLL's name), never at the install or run folder (R352).
+    {"kind": "value-pattern", "key": re.escape(LOCAL_SETTINGS) + r"\\MuiCache\\[0-9a-f]+\\52C64B7E",
+     "name": (r"(@%SystemRoot%\\System32\\[\w.-]+\.dll,-[0-9]+"
+              r"|C:\\Windows\\system32,@[\w.-]+\.dll,-[0-9]+)"),
+     "reason": "Windows' cache of the display strings it loads from its own DLLs (MuiCache), "
+               "filled when a program starts"},
+    {"kind": "file-changed-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Windows\Explorer",
+     "name": r"(iconcache|thumbcache)_[\w]+\.db",
+     "reason": "Explorer's own icon and thumbnail caches, which it rewrites when it refreshes icons"},
     {"kind": "key-only", "path": SHELL_MUICACHE, "reason": MUI + ": the cache's own key"},
     {"kind": "value-pattern", "path": SHELL_MUICACHE,
      # {run} is the escaped run folder (--run-folder, or RUNNER_TEMP\portable-run\LitePack); with
@@ -115,6 +158,52 @@ ALLOW = [
     {"kind": "key",
      "path": r"HKCU\Software\Microsoft\EdgeUpdate\ClientState\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
      "reason": WEBVIEW2 + ": the runtime's update state under its own GUID"},
+    # E7-5's first installer diff (CI run 42486016300): what Windows' shell and Start menu record
+    # when an installer adds and its uninstaller removes a Start menu and a desktop shortcut, and
+    # what Windows records when the installed GUI runs. The jump list Windows keeps for LitePack's
+    # AppUserModelID is LitePack's and is removed by the uninstaller instead (installer.nsh).
+    {"kind": "file-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Windows\Caches",
+     "name": r"\{3DA71D5A-20CC-432F-A115-DFE92379E91F\}\.3\.ver0x[0-9a-f]{16}\.db",
+     "reason": START + ": the shell's cache of the installed programs, one file per version"},
+    {"kind": "file-pattern",
+     "path": r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\LocalState\Search",
+     "name": r"AppsIndex\.db(-wal|-shm)?", "reason": START + ": Windows Search's index of the apps"},
+    {"kind": "file-pattern",
+     "path": r"%LOCALAPPDATA%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState",
+     "name": r"start2\.bin", "reason": START + ": the Start menu's layout state"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Start", "name": "Config",
+     "reason": START + ": the Start menu's configuration"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search",
+     "name": "InstalledWin32AppsRevision",
+     "reason": START + ": Windows Search's revision of the installed desktop programs"},
+    # The GUID in this key's name differs between runners (56dd80ad-... in run 42486016300,
+    # e7cbac1d-... in run 42489790951): the key is matched by its shape, the value by its name.
+    {"kind": "key-pattern-value",
+     "path": (r"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\Cache"
+              r"\\DefaultAccount\\\$de\$\{[0-9a-f-]{36}\}\$\$windows\.data\.unifiedtile"
+              r"\.localstarttilepropertiesmap\\Current"),
+     "name": "Data", "reason": START + ": the Start menu's tile properties (CloudStore)"},
+    {"kind": "file-pattern",
+     "path": r"%LOCALAPPDATA%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\TempState",
+     "name": r"prep_Activatable Class_Hermes_perf\.cache",
+     "reason": START + ": a performance cache of the Start menu's host (run 42489790951)"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop",
+     "name": "IconLayouts",
+     "reason": "Explorer's desktop icon positions, rewritten when a desktop shortcut comes and goes"},
+    {"kind": "file", "path": r"%LOCALAPPDATA%\Microsoft\Windows\WebCache",
+     "reason": "WinINet's shared cache database (ESE), updated by any program that uses WinINet or "
+               "urlmon (Windows' own, shared by every user program)"},
+    {"kind": "value-pattern", "path": SHELL_MUICACHE,
+     "name": r"C:\\Windows\\System32\\conhost\.exe\.(ApplicationCompany|FriendlyAppName)",
+     "reason": MUI + ": Windows' Console Window Host (conhost.exe)"},
+    {"kind": "value-pattern", "path": USERASSIST_COUNT, "name": r"{run13}\\ycx-thv\.rkr",
+     "reason": "Explorer's usage record (UserAssist) of lpk-gui.exe, keyed by its path in the run "
+               "folder (ROT13, as Explorer stores it)"},
+    {"kind": "value", "path": r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon",
+     "name": "ParseAutoexec",
+     "reason": "R324: Windows' own legacy logon setting (Winlogon), most likely rewritten when "
+               "Windows rebuilds the environment after the Path broadcast; nothing in LitePack's "
+               "repository names Winlogon but this entry (grep, 2026-11-08)"},
     # R301.
     {"kind": "empty-key", "path": APPCONTAINER, "reason": APPCONTAINER_REASON},
     {"kind": "empty-key", "path": MAPPINGS, "reason": APPCONTAINER_REASON},
@@ -260,9 +349,13 @@ def snapshot(out, on_ci):
     out = Path(out)
     files = {}
     for token in FILE_ROOTS:
-        root = os.environ.get(token)
+        root = root_dir(token)
         if not root:
-            raise SystemExit(f"e7-residue: %{token}% is not set")
+            raise SystemExit(f"e7-residue: the folder of %{token}% is not set")
+        if not os.path.isdir(root):
+            # Recorded, so that a root created later shows up as a change.
+            files[f"%{token}%"] = {"kind": "absent"}
+            continue
         walk(root, token, files)
     registry = {}
     with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
@@ -338,6 +431,32 @@ def empty_key(snap, key):
     return found
 
 
+def rot13(text):
+    """Explorer's UserAssist value names: ROT13 over the ASCII letters."""
+    return codecs.encode(str(text), "rot13")
+
+
+def uninstaller_copy(path, after):
+    """R312: NSIS's uninstaller self-copy, exactly %LOCALAPPDATA%\\Temp\\~nsu*.tmp holding one
+    Un.exe or Un_<letter>.exe and nothing else (in `after`): the folder or that file."""
+    def is_dir(p):
+        folder, _, leaf = p.rpartition("\\")
+        return norm(folder) == norm(r"%LOCALAPPDATA%\Temp") and \
+            re.fullmatch(r"~nsu[0-9a-z]*\.tmp", leaf, re.IGNORECASE)
+    folder = path if is_dir(path) else path.rpartition("\\")[0]
+    if not is_dir(folder):
+        return False
+    inside = [p for p in after["files"] if under(p, folder) and norm(p) != norm(folder)]
+    return len(inside) == 1 and re.fullmatch(r"Un(_[A-Z])?\.exe", inside[0].rpartition("\\")[2],
+                                              re.IGNORECASE) is not None and \
+        after["files"][inside[0]].get("kind") == "file"
+
+
+UNINSTALLER_REASON = ("R312: NSIS's uninstaller copy; NSIS runs the uninstaller from a copy so that it "
+                      "can remove the install folder, and only a reboot could delete that copy, which "
+                      "a per-user uninstaller cannot schedule")
+
+
 def run_pattern(run):
     """The escaped run folder for the `{run}` placeholder; None when no run folder is known."""
     if not run:
@@ -358,21 +477,37 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
         if a["kind"] == "value" and kind == "value" and norm(path) == norm(a["path"]) and \
                 norm(name) == norm(a["name"]):
             return a["reason"]
-        if a["kind"] == "value-pattern" and kind == "value" and norm(path) == norm(a["path"]):
+        if a["kind"] == "file-changed-pattern" and kind == "file" and sign == "~":
+            folder, _, leaf = path.rpartition("\\")
+            if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
+                return a["reason"]
+        if a["kind"] == "value-pattern" and kind == "value" and (
+                re.fullmatch(a["key"], path, re.IGNORECASE) if "key" in a
+                else norm(path) == norm(a["path"])):
             pattern = a["name"]
-            if "{run}" in pattern:
-                folder = run_pattern(run)
-                if folder is None:
-                    continue
-                pattern = pattern.replace("{run}", folder)
+            for token, folder in (("{run}", run), ("{run13}", rot13(run) if run else None)):
+                if token in pattern:
+                    escaped = run_pattern(folder)
+                    if escaped is None:
+                        pattern = None
+                        break
+                    pattern = pattern.replace(token, escaped)
+            if pattern is None:
+                continue
             if re.fullmatch(pattern, name, re.IGNORECASE | re.DOTALL):
                 return a["reason"]
+        if a["kind"] == "key-pattern-value" and kind == "value" and \
+                re.fullmatch(a["path"], path, re.IGNORECASE) and norm(name) == norm(a["name"]):
+            return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
             return a["reason"]
         if a["kind"] == "file-pattern" and kind == "file":
             folder, _, leaf = path.rpartition("\\")
             if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
                 return a["reason"]
+        if a["kind"] == "file-changed" and kind == "file" and sign == "~" and \
+                norm(path) == norm(a["path"]):
+            return a["reason"]
         if a["kind"] == "empty-key" and kind == "key" and sign == "+" and \
                 norm(path) == norm(a["path"]) and empty_key(after, path):
             return a["reason"]
@@ -391,7 +526,13 @@ def show(kind, path, name, rec):
     return f"{rec.get('kind')} {path}"
 
 
-def diff(before, after, allow_profile, run=None):
+def settings_only(after):
+    """Whether %APPDATA%\\LitePack holds nothing but settings.json in `after`."""
+    inside = [p for p in after["files"] if under(p, SETTINGS_DIR) and norm(p) != norm(SETTINGS_DIR)]
+    return all(norm(p) == norm(SETTINGS_FILE) for p in inside)
+
+
+def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uninstaller=False):
     """The diff's lines and the number of entries not allowed. A path unreadable in either
     snapshot is listed (and counted unless allowed) even when both record it alike: what lies
     inside it was not seen."""
@@ -416,14 +557,20 @@ def diff(before, after, allow_profile, run=None):
     lines, bad = [], 0
     for sign, path, name, rec, kind in changes:
         text = f"{sign} {show(kind, path, name, rec)}"
-        reason = allowed(kind, path, name, sign, after, run,
-                         kind == "file" and norm(path) in unreadable)
+        unread = kind == "file" and norm(path) in unreadable
+        reason = allowed(kind, path, name, sign, after, run, unread)
         ancestor = kind == "key" and sign in "+-" and norm(path) not in valued and \
             any(under(p, path) and norm(p) != norm(path) for p in profile_keys)
+        if not reason and allow_settings and not unread and kind == "file" and sign == "+" and \
+                norm(path) in (norm(SETTINGS_DIR), norm(SETTINGS_FILE)) and settings_only(after):
+            reason = SETTINGS_REASON
+        if not reason and allow_uninstaller and not unread and kind == "file" and sign == "+" and \
+                uninstaller_copy(path, after):
+            reason = UNINSTALLER_REASON
         if reason:
             lines.append(f"allowed: {text}  -- {reason}")
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
-                not (kind == "file" and rec.get("kind") == "unreadable"):
+                not unread:
             lines.append(f"profile: {text}")
         else:
             lines.append(f"RESIDUE: {text}")
@@ -464,6 +611,10 @@ def main(argv):
                         "RUNNER_TEMP\\portable-run\\LitePack when RUNNER_TEMP is set)")
     d.add_argument("--require-worker-profile", action="store_true",
                    help="allow the profile, and fail unless its folder and Mappings key were added")
+    d.add_argument("--allow-settings", action="store_true",
+                   help=r"allow %%APPDATA%%\LitePack\settings.json alone (an uninstall without the box)")
+    d.add_argument("--allow-uninstaller-copy", action="store_true",
+                   help=r"R312: allow %%LOCALAPPDATA%%\Temp\~nsu*.tmp holding one Un.exe alone")
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
         snapshot(a.out, a.on_ci)
@@ -473,7 +624,8 @@ def main(argv):
     run = a.run_folder
     if run is None and os.environ.get("RUNNER_TEMP"):
         run = os.path.join(os.environ["RUNNER_TEMP"], "portable-run", "LitePack")
-    lines, bad = diff(load(a.before), load(a.after), allow, run)
+    lines, bad = diff(load(a.before), load(a.after), allow, run, a.allow_settings,
+                      a.allow_uninstaller_copy)
     for line in lines:
         print(line)
     flag = " (worker profile allowed)" if allow else ""
@@ -526,6 +678,81 @@ class Tests(unittest.TestCase):
         self.assertEqual(lines, [r"RESIDUE: + file %APPDATA%\LitePack\settings.json "
                                  "(1 bytes, mtime 1)"])
 
+    def test_the_settings_file_alone_is_allowed_with_the_flag(self):
+        files = dict(self.base["files"], **{SETTINGS_DIR: {"kind": "dir"}, SETTINGS_FILE: f()})
+        after = snap(files, self.base["registry"])
+        lines, bad = diff(self.base, after, False, allow_settings=True)
+        self.assertEqual(bad, 0, lines)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(line.startswith("allowed: + ") for line in lines), lines)
+        self.assertEqual(diff(self.base, after, False)[1], 2)
+        # Anything else in the folder, and the folder then, is residue; so is a changed file.
+        more = dict(files, **{SETTINGS_DIR + r"\recent.json": f()})
+        lines, bad = diff(self.base, snap(more, self.base["registry"]), False, allow_settings=True)
+        self.assertEqual(bad, 3, lines)
+        before = snap(files, self.base["registry"])
+        changed = snap(dict(files, **{SETTINGS_FILE: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False, allow_settings=True)[1], 1)
+
+    def test_a_profile_path_unreadable_before_is_never_excused(self):
+        # R317: a change inside the profile whose earlier side was unreadable is residue, even
+        # with the profile allowed, since what lay inside it was not seen.
+        ac = r"%LOCALAPPDATA%\Packages\litepack.worker\AC"
+        before = with_profile(self.base)
+        before["files"][ac] = {"kind": "unreadable", "error": "PermissionError"}
+        after = with_profile(self.base)
+        after["files"][ac] = {"kind": "dir"}
+        lines, bad = diff(before, after, True)
+        self.assertEqual(bad, 1, lines)
+        self.assertIn("RESIDUE: ~ dir " + ac, lines)
+
+    def test_the_uninstaller_copy_alone_is_allowed_with_the_flag(self):
+        folder = r"%LOCALAPPDATA%\Temp\~nsu1.tmp"
+        files = dict(self.base["files"], **{folder: {"kind": "dir"}, folder + r"\Un.exe": f()})
+        after = snap(files, self.base["registry"])
+        lines, bad = diff(self.base, after, False, allow_uninstaller=True)
+        self.assertEqual(bad, 0, lines)
+        self.assertEqual(diff(self.base, after, False)[1], 2)
+        # Another file beside it, or another name, is residue.
+        more = snap(dict(files, **{folder + r"\x.dll": f()}), self.base["registry"])
+        self.assertEqual(diff(self.base, more, False, allow_uninstaller=True)[1], 3)
+        other = snap(dict(self.base["files"], **{r"%LOCALAPPDATA%\Temp\other.tmp": {"kind": "dir"},
+                                                 r"%LOCALAPPDATA%\Temp\other.tmp\Un.exe": f()}),
+                     self.base["registry"])
+        self.assertEqual(diff(self.base, other, False, allow_uninstaller=True)[1], 2)
+
+    def test_userassist_of_the_run_folder_is_matched_in_rot13(self):
+        run = r"C:\Users\u\AppData\Local\LitePack"
+        name = rot13(run) + r"\ycx-thv.rkr"
+        before = snap(self.base["files"], dict(self.base["registry"], **{USERASSIST_COUNT: {}}))
+        after = snap(self.base["files"],
+                     dict(self.base["registry"], **{USERASSIST_COUNT: {name: "hex:00"}}))
+        self.assertEqual(diff(before, after, False, run)[1], 0)
+        self.assertEqual(diff(before, after, False)[1], 1)
+        self.assertEqual(diff(before, after, False, r"C:\elsewhere")[1], 1)
+
+    def test_the_start_tile_cache_is_matched_by_its_shape(self):
+        key = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+               r"\$de${e7cbac1d-30b4-408f-a41d-5714e42e257a}$$windows.data.unifiedtile"
+               r".localstarttilepropertiesmap\Current")
+        before = snap(self.base["files"], dict(self.base["registry"], **{key: {"Data": "hex:01"}}))
+        after = snap(self.base["files"], dict(self.base["registry"], **{key: {"Data": "hex:02"}}))
+        self.assertEqual(diff(before, after, False)[1], 0)
+        other = snap(self.base["files"], dict(self.base["registry"], **{key: {"Data": "hex:01", "X": "1"}}))
+        self.assertEqual(diff(before, other, False)[1], 1)
+        bent = key.replace("unifiedtile", "unifiedtileX")
+        moved = snap(self.base["files"], dict(self.base["registry"], **{bent: {"Data": "hex:02"}}))
+        self.assertEqual(diff(snap(self.base["files"], dict(self.base["registry"], **{bent: {"Data": "1"}})),
+                              moved, False)[1], 1)
+
+    def test_a_desktop_shortcut_is_residue(self):
+        before = snap(dict(self.base["files"], **{"%DESKTOP%": {"kind": "absent"}}),
+                      self.base["registry"])
+        after = snap(dict(self.base["files"], **{r"%DESKTOP%\LitePack.lnk": f()}),
+                     self.base["registry"])
+        lines, bad = diff(before, after, True, allow_settings=True)
+        self.assertEqual(bad, 2, lines)
+
     def test_a_removed_and_a_changed_file(self):
         after = snap({r"%LOCALAPPDATA%\b": f()}, self.base["registry"])
         before = snap(dict(self.base["files"], **{r"%LOCALAPPDATA%\b": f(mtime=0)}),
@@ -567,6 +794,26 @@ class Tests(unittest.TestCase):
         after = snap(self.base["files"], dict(self.base["registry"], **{k: v for k, v in keys}))
         return diff(self.base, after, False, run)
 
+    def test_spotlight_allows_its_four_values_only(self):
+        # As on CI: the keys exist; Maintenance is added, State, PCT and PTT change.
+        other_lu = SPOTLIGHT_LU.replace("Global.DesktopSpotlight", "Other")
+        reg = dict(self.base["registry"], **{SPOTLIGHT: {"State": '"s0"'},
+                                             SPOTLIGHT_LU: {"PCT": "hex(b):00", "PTT": "hex(b):00"},
+                                             other_lu: {"PCT": "hex(b):00"}})
+        before = snap(self.base["files"], reg)
+
+        def after(spot, lu, other=None):
+            return snap(self.base["files"], dict(reg, **{SPOTLIGHT: spot, SPOTLIGHT_LU: lu,
+                                                         other_lu: other or {"PCT": "hex(b):00"}}))
+        changed = {"PCT": "hex(b):01", "PTT": "hex(b):02"}
+        lines, bad = diff(before, after({"Maintenance": '"m"', "State": '"s1"'}, changed), False)
+        self.assertEqual(bad, 0, lines)
+        # Another value there, or the same name in another key, is residue.
+        for case in (after({"State": '"s0"', "Other": '"x"'}, {"PCT": "hex(b):00", "PTT": "hex(b):00"}),
+                     after({"State": '"s0"'}, {"PCT": "hex(b):00", "PTT": "hex(b):00"}, {"PCT": "hex(b):01"})):
+            lines, bad = diff(before, case, False)
+            self.assertEqual(bad, 1, lines)
+
     def test_a_webview2_key_below_its_root_is_allowed_and_a_sibling_is_not(self):
         root = r"HKCU\Software\Microsoft\EdgeWebView"
         lines, bad = self.added_keys([(root + r"\BLBeacon", {"version": '"1"'})])
@@ -585,6 +832,51 @@ class Tests(unittest.TestCase):
                          r"%LOCALAPPDATA%\Microsoft\Credentials\litepack"):
             after = snap(dict(self.base["files"], **{bad_path: f()}), self.base["registry"])
             self.assertEqual(diff(self.base, after, False)[1], 1, bad_path)
+
+    def test_the_classes_hive_files_are_allowed_changed_only(self):
+        win = r"%LOCALAPPDATA%\Microsoft\Windows"
+        hive = [win + "\\" + n for n in ("UsrClass.dat", "UsrClass.dat.LOG1", "UsrClass.dat.LOG2")]
+        before = snap(dict(self.base["files"], **{h: f() for h in hive}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{h: f(size=2) for h in hive}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 0)
+        # Added or removed, they are residue; so is a sibling.
+        self.assertEqual(diff(self.base, before, False)[1], 3)
+        self.assertEqual(diff(before, self.base, False)[1], 3)
+        sib = win + r"\UsrClass2.dat"
+        before = snap(dict(self.base["files"], **{sib: f()}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{sib: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 1)
+
+    def test_the_muicache_allows_windows_dll_strings_in_any_hex_subkey_only(self):
+        key = LOCAL_SETTINGS + r"\MuiCache\1a7\52C64B7E"
+        before = snap(self.base["files"], dict(self.base["registry"], **{key: {"seed": '"s"'}}))
+
+        def bad_of(k, names):
+            reg = dict(self.base["registry"], **{key: {"seed": '"s"'}})
+            reg[k] = dict(reg.get(k, {}), **names)
+            return diff(before, snap(self.base["files"], reg), False, "D:/a/_temp/portable-run/LitePack")
+        urlmon = {r"@%SystemRoot%\System32\urlmon.dll,-4200": '"Open File - Security Warning"',
+                  r"C:\Windows\system32,@elscore.dll,-7": '"x"'}
+        lines, bad = bad_of(key, urlmon)
+        self.assertEqual(bad, 0, lines)
+        # The same name under an unrelated key, or naming another folder's DLL, is residue.
+        other = LOCAL_SETTINGS + r"\Other\1a7\52C64B7E"
+        self.assertEqual(bad_of(other, urlmon)[1], 2 + 1)
+        for name in (r"@D:\a\_temp\portable-run\LitePack\x.dll,-1", r"C:\Windows\system32\sub,@x.dll,-1",
+                     r"@%SystemRoot%\System32\sub\x.dll,-1", r"C:\a\LitePack,@lpk.dll,-1"):
+            lines, bad = bad_of(key, {name: '"x"'})
+            self.assertEqual(bad, 1, lines)
+
+    def test_explorers_icon_cache_is_allowed_changed_only(self):
+        ex = r"%LOCALAPPDATA%\Microsoft\Windows\Explorer"
+        idx, other = ex + r"\iconcache_idx.db", ex + r"\other.db"
+        before = snap(dict(self.base["files"], **{idx: f(), other: f()}), self.base["registry"])
+        changed = snap(dict(self.base["files"], **{idx: f(size=2), other: f()}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 0)
+        added = snap(dict(before["files"], **{ex + r"\iconcache_99.db": f()}), self.base["registry"])
+        self.assertEqual(diff(before, added, False)[1], 1)
+        changed = snap(dict(self.base["files"], **{idx: f(), other: f(size=2)}), self.base["registry"])
+        self.assertEqual(diff(before, changed, False)[1], 1)
 
     def test_the_muicache_allows_lpk_gui_names_in_the_run_folder_only(self):
         mui = SHELL_MUICACHE
