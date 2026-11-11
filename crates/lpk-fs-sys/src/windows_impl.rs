@@ -27,11 +27,13 @@ use windows::Win32::Security::{
     TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{
-    FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdInfo,
+    FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdInfo,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ACCESS_RIGHTS,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO,
     FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ,
@@ -256,12 +258,71 @@ fn file_id(h: &OwnedHandle) -> Result<FileId, FsError> {
     })
 }
 
+/// Add the attributes asked for (read-only, hidden, system) to what `file` is open on (with
+/// `FILE_WRITE_ATTRIBUTES`); the other attributes and the times are left as they are.
+pub fn add_attributes(
+    file: &File,
+    read_only: bool,
+    hidden: bool,
+    system: bool,
+) -> Result<(), FsError> {
+    let mut add = 0;
+    if read_only {
+        add |= FILE_ATTRIBUTE_READONLY.0;
+    }
+    if hidden {
+        add |= FILE_ATTRIBUTE_HIDDEN.0;
+    }
+    if system {
+        add |= FILE_ATTRIBUTE_SYSTEM.0;
+    }
+    if add == 0 {
+        return Ok(());
+    }
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: `info` is a live, correctly sized output buffer for this class; `file` is open.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle()),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    if info.FileAttributes & add == add {
+        return Ok(());
+    }
+    let set = FILE_BASIC_INFO {
+        // Zero times: left unchanged.
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        // FILE_ATTRIBUTE_NORMAL is valid only alone; it goes when another attribute comes.
+        FileAttributes: (info.FileAttributes & !FILE_ATTRIBUTE_NORMAL.0) | add,
+    };
+    // SAFETY: `set` is a live, correctly sized input buffer for this class; `file` is open.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileBasicInfo,
+            (&raw const set).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    Ok(())
+}
+
 /// Delete what `h` is open on (opened with `DELETE`): POSIX semantics where the volume has
-/// them (the name goes at once), else the classic disposition (the name goes at the close).
+/// them (the name goes at once; a read-only file too, as an extraction may have set that
+/// attribute on a file it later replaces), else the classic disposition (the name goes at the
+/// close).
 fn dispose(h: &OwnedHandle) -> Result<(), FsError> {
     let ex = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
-            FILE_DISPOSITION_FLAG_DELETE.0 | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0,
+            FILE_DISPOSITION_FLAG_DELETE.0
+                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
+                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
         ),
     };
     // SAFETY: `ex` is a live, correctly sized input buffer for this class; `h` is open.
@@ -381,6 +442,30 @@ impl Dir {
             FILE_SHARE_ALL,
             FILE_OPEN,
             FILE_NON_DIRECTORY_FILE,
+        )?;
+        let (attrs, tag) = tag_info(&h)?;
+        if is_name_surrogate(attrs, tag) {
+            return Err(FsError::Linked);
+        }
+        if file_id(&h)? != id {
+            return Err(FsError::Changed);
+        }
+        Ok(File::from(h))
+    }
+
+    /// Open the child directory `name` to change its attributes and times (no more access
+    /// than that, no `DELETE`), when it is still the directory `id`; a name-surrogate
+    /// reparse point there is [`FsError::Linked`]. The handle is a [`File`], so the times are
+    /// set with `File::set_modified`.
+    pub fn open_dir_attributes(&self, name: &OsStr, id: FileId) -> Result<File, FsError> {
+        let w = component(name)?;
+        let h = nt_create(
+            &self.h,
+            &w,
+            FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_ALL,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
         )?;
         let (attrs, tag) = tag_info(&h)?;
         if is_name_surrogate(attrs, tag) {

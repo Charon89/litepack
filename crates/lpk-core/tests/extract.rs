@@ -887,3 +887,90 @@ fn the_held_permits_at_fixed_budgets() {
     let s = run(8, u64::MAX, "o4");
     assert_eq!((s.workers, s.in_flight), (6, blocks.min(48)));
 }
+
+/// An archive with directory times and file flags (E2-19's parked item): `d` (time 3 s) holds
+/// `d/sub` (time 2 s, hidden) and the read-only `d/ro.txt`; `d/sub/x` (hidden, executable)
+/// is written last, inside the deepest directory, so a directory time set too early would move.
+fn flagged_archive() -> Vec<u8> {
+    let s = 1_000_000_000i64;
+    let mut out = Vec::new();
+    let mut w = Writer::new(&mut out, options()).unwrap();
+    w.add_directory("d", EntryFlags::EMPTY, 3 * s).unwrap();
+    w.add_directory("d/sub", EntryFlags::HIDDEN, 2 * s).unwrap();
+    w.add_file("d/ro.txt", EntryFlags::READ_ONLY, s, &mut &b"read only"[..])
+        .unwrap();
+    w.add_file(
+        "d/sub/x",
+        EntryFlags::HIDDEN.union(EntryFlags::EXECUTABLE),
+        s,
+        &mut &noise(3, 20_000)[..],
+    )
+    .unwrap();
+    w.finish().unwrap();
+    out
+}
+
+#[test]
+fn directory_times_and_file_flags_are_restored() {
+    let bytes = flagged_archive();
+    for n in [1, 4] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        extract(&bytes, &out, &threads(n)).unwrap();
+        let mtime = |p: &str| std::fs::metadata(out.join(p)).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime("d"),
+            UNIX_EPOCH + Duration::from_secs(3),
+            "threads {n}"
+        );
+        assert_eq!(
+            mtime("d/sub"),
+            UNIX_EPOCH + Duration::from_secs(2),
+            "threads {n}"
+        );
+        let ro = std::fs::metadata(out.join("d/ro.txt")).unwrap();
+        assert!(ro.permissions().readonly(), "threads {n}");
+        // (Not asserted on Unix: a root test run opens a read-only file for writing.)
+        #[cfg(windows)]
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(out.join("d/ro.txt"))
+            .is_err());
+        assert_eq!(std::fs::read(out.join("d/ro.txt")).unwrap(), b"read only");
+        let x = std::fs::metadata(out.join("d/sub/x")).unwrap();
+        assert!(!x.permissions().readonly());
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const HIDDEN: u32 = 0x2;
+            assert_ne!(x.file_attributes() & HIDDEN, 0);
+            let sub = std::fs::metadata(out.join("d/sub")).unwrap();
+            assert_ne!(sub.file_attributes() & HIDDEN, 0);
+            let top = std::fs::metadata(out.join("d")).unwrap();
+            assert_eq!(top.file_attributes() & HIDDEN, 0);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = x.permissions().mode();
+            assert_eq!(mode & 0o100, 0o100, "{mode:o}");
+            assert_eq!(ro.permissions().mode() & 0o222, 0);
+        }
+    }
+}
+
+/// A read-only file an earlier extraction made is replaced under `--overwrite replace`.
+#[test]
+fn a_read_only_file_extracted_earlier_is_replaced() {
+    let bytes = flagged_archive();
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    extract(&bytes, &out, &threads(2)).unwrap();
+    let replace = lpk_core::Policy::new(lpk_core::Overwrite::Replace, lpk_core::Symlinks::Skip);
+    extract_with(&bytes, &out, &threads(2), &replace).unwrap();
+    let ro = out.join("d/ro.txt");
+    assert_eq!(std::fs::read(&ro).unwrap(), b"read only");
+    assert!(std::fs::metadata(&ro).unwrap().permissions().readonly());
+    // The tree with its read-only file is removable.
+    d.close().unwrap();
+}

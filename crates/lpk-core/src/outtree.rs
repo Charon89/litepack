@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::extract::Link;
+use lpk_format::EntryFlags;
+
+use crate::extract::{DirMeta, Link};
 use crate::motw::Zone;
 use crate::CoreError;
 
@@ -284,6 +286,114 @@ impl Tree {
                     path: path.to_path_buf(),
                 },
             ))
+        }
+    }
+
+    /// Apply an entry's flags to a file this tree created, through its open write handle
+    /// (never by path, so never through a link), after its last write and its time. Windows:
+    /// read-only, hidden and system are added. Unix: read-only clears the write bits,
+    /// executable adds an execute bit for each read bit. Other systems: nothing.
+    pub(crate) fn set_file_flags(
+        &self,
+        f: &File,
+        path: &Path,
+        flags: EntryFlags,
+    ) -> Result<(), CoreError> {
+        #[cfg(windows)]
+        {
+            lpk_fs_sys::add_attributes(
+                f,
+                flags.contains(EntryFlags::READ_ONLY),
+                flags.contains(EntryFlags::HIDDEN),
+                flags.contains(EntryFlags::SYSTEM),
+            )
+            .map_err(|e| win::fs_err(path, e))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if !flags.contains(EntryFlags::READ_ONLY) && !flags.contains(EntryFlags::EXECUTABLE) {
+                return Ok(());
+            }
+            let mut perm = f.metadata().map_err(|e| io(path, e))?.permissions();
+            let mut mode = perm.mode();
+            if flags.contains(EntryFlags::EXECUTABLE) {
+                mode |= (mode & 0o444) >> 2;
+            }
+            if flags.contains(EntryFlags::READ_ONLY) {
+                mode &= !0o222;
+            }
+            if mode != perm.mode() {
+                perm.set_mode(mode);
+                f.set_permissions(perm).map_err(|e| io(path, e))?;
+            }
+            Ok(())
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (f, path, flags);
+            Ok(())
+        }
+    }
+
+    /// Set the directory entries' attributes (hidden and system, on Windows) and times, the
+    /// deepest first, once every file is finished. Each directory is opened as itself, never
+    /// through a link: on Windows relative to its held parent with its recorded file ID; on
+    /// Unix it must be a directory (not a link) before the open and the same inode after it.
+    pub(crate) fn finish_dirs(&self, dirs: &[DirMeta]) -> Result<(), CoreError> {
+        let mut order: Vec<&DirMeta> = dirs.iter().collect();
+        order.sort_by_key(|d| std::cmp::Reverse(d.path.components().count()));
+        for d in order {
+            let time = crate::extract::mtime(d.mtime_ns);
+            let hidden = d.flags.contains(EntryFlags::HIDDEN);
+            let system = d.flags.contains(EntryFlags::SYSTEM);
+            if time.is_none() && !(cfg!(windows) && (hidden || system)) {
+                continue;
+            }
+            let f = self.open_dir_attributes(&d.path)?;
+            #[cfg(windows)]
+            lpk_fs_sys::add_attributes(&f, false, hidden, system)
+                .map_err(|e| win::fs_err(&d.path, e))?;
+            if let Some(m) = time {
+                f.set_modified(m).map_err(|e| io(&d.path, e))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_dir_attributes(&self, path: &Path) -> Result<File, CoreError> {
+        let rel = self.rel(path)?;
+        #[cfg(windows)]
+        {
+            let id = self.win.dir(&self.root, rel, false)?.id();
+            let (parent, name) = self.win.parent_of(&self.root, rel, path)?;
+            parent
+                .open_dir_attributes(name, id)
+                .map_err(|e| win::fs_err(path, e))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rel;
+            let before = std::fs::symlink_metadata(path).map_err(|e| io(path, e))?;
+            if !before.file_type().is_dir() {
+                return Err(io(
+                    path,
+                    std::io::Error::other("not a directory (a link or a file is in its place)"),
+                ));
+            }
+            let f = File::open(path).map_err(|e| io(path, e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let after = f.metadata().map_err(|e| io(path, e))?;
+                if (after.dev(), after.ino()) != (before.dev(), before.ino()) {
+                    return Err(io(
+                        path,
+                        std::io::Error::other("the directory changed while it was opened"),
+                    ));
+                }
+            }
+            Ok(f)
         }
     }
 

@@ -19,6 +19,9 @@
 //!   E6-5), opened relative to the file's own handle; [`named_streams`] probes the volume's
 //!   `FILE_NAMED_STREAMS` flag first.
 //!
+//! * [`Dir::open_dir_attributes`] and [`add_attributes`]: an extracted directory's times and
+//!   attributes, and a file's attributes, set through handles (E2-19's parked item).
+//!
 //! Every name is one component: empty, `.`, `..`, or a name with `\`, `/`, `:` or NUL is
 //! refused before any call. Nothing here assumes `MAX_PATH`.
 //!
@@ -31,7 +34,8 @@ mod windows_impl;
 
 #[cfg(windows)]
 pub use windows_impl::{
-    named_streams, read_stream, symlink_privilege_held, write_stream, Dir, FileId, FsError,
+    add_attributes, named_streams, read_stream, symlink_privilege_held, write_stream, Dir, FileId,
+    FsError,
 };
 
 #[cfg(all(windows, feature = "test-hooks"))]
