@@ -171,6 +171,16 @@ has its own folder, R308; the overlay's folder name is tested against `tauri.con
   `shell\<version>`, `shell` and the install folder only if each is empty: never recursively, so nothing else in a
   `/D=` folder can go. CI holds the DLL open during an uninstall, checks the command, runs it, and checks that a
   reinstall cancels it.
+- RunOnce limits (R335): Windows runs a Run/RunOnce command of at most 260 characters, so the logon cleanup is one
+  value per action, numbered in the order it must run: `LitePack uninstall 1` to `4` (and `LitePack shell <version>
+  1` to `4` after an upgrade) delete `shell\<version>\lpk_shell.dll`, then rmdir `shell\<version>`, `shell` and the
+  install folder; `LitePack bin 1` to `3` delete `bin\*.old-*` (executables set aside while they ran), then rmdir
+  `bin` and the install folder. Each group's delete is measured first: an install path long enough to push it past
+  260 characters gets no value at all, and what is left stays until the next install, whose cleanup deletes
+  `bin\*.old-*` and other versions' `shell\` folders. Windows does not document the order in which it runs RunOnce
+  values. The deletes come first and each later rmdir only removes an empty folder, so a different order can only
+  leave an empty folder behind, which the next install removes. A reinstall cancels every `LitePack *` value; CI
+  lists them with `scripts/e7-runonce.py`, requires each to be at most 260 characters, and runs them in order.
 
 **Switches.** Tauri's: `/S` silent (installer and uninstaller), `/P` passive (a progress bar), `/NS` no shortcuts,
 `/D=<dir>` (last and unquoted), `/R` relaunch after a silent or passive install; `/UPDATE` and `/ARGS` are the

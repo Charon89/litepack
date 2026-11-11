@@ -707,34 +707,57 @@ fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     let exe = format!("{}.exe", conf["mainBinaryName"].as_str().unwrap());
     assert!(nsh.contains(&format!("!define LPK_PRODUCT \"{product}\"")));
     assert!(nsh.contains(&format!("!define LPK_MAIN_EXE \"{exe}\"")));
-    // R329, R334: the two RunOnce commands. Each deletes only its own files (the shell DLL; bin\'s set-aside
-    // `*.old-*` executables), then empty folders under $INSTDIR, never recursively.
-    let commands: Vec<String> = nsh
-        .lines()
-        .filter(|l| l.contains("cmd.exe"))
-        .map(str::to_lowercase)
-        .collect();
-    assert_eq!(commands.len(), 2, "{commands:?}");
+    // R329, R334, R335: one RunOnce value per action (Windows runs at most 260 characters per command), each
+    // `${LPK_CMD} <one action>` with no `&`: a delete of LitePack's own files (the shell DLL; bin\'s set-aside
+    // `*.old-*` executables) or an rmdir under $INSTDIR, never recursive.
+    assert!(nsh.contains(r#"!define LPK_CMD '"$SYSDIR\cmd.exe" /d /c'"#));
     let deletes = [
-        r#""$sysdir\cmd.exe" /d /c del /f /q "$instdir\shell\${version}\lpk_shell.dll""#,
-        r#""$sysdir\cmd.exe" /d /c del /f /q "$instdir\bin\*.old-*""#,
+        r#"del /f /q "$instdir\shell\${version}\lpk_shell.dll""#,
+        r#"del /f /q "$instdir\bin\*.old-*""#,
     ];
-    for (cmd, delete) in commands.iter().zip(deletes) {
-        assert!(!cmd.contains("/s"), "{cmd}");
-        let mut parts = cmd.trim().trim_matches('\'').split(" & ");
-        assert_eq!(parts.next(), Some(delete), "{cmd}");
-        for part in parts {
-            assert!(part.trim().starts_with("rmdir \"$instdir"), "{part}");
+    let mut seen = [false; 2];
+    let actions: Vec<String> = nsh
+        .lines()
+        .filter_map(|l| l.split("'${LPK_CMD} ").nth(1))
+        .map(|a| a.trim_end().trim_end_matches('\'').to_lowercase())
+        .collect();
+    assert_eq!(actions.len(), 7, "{actions:?}");
+    for a in &actions {
+        assert!(!a.contains('&') && !a.contains("/s"), "{a}");
+        if let Some(i) = deletes.iter().position(|d| a == d) {
+            seen[i] = true;
+        } else {
+            assert!(a.starts_with("rmdir \"$instdir"), "{a}");
         }
     }
-    // A reinstall cancels both values before the next logon could remove the new installation's files.
+    assert_eq!(seen, [true, true]);
+    // Each group's delete is measured before anything is written; over 260 characters, nothing is.
+    for group in [
+        "!macro LPK_RUNONCE_REMOVE_SHELL",
+        "!macro LPK_RUNONCE_REMOVE_SET_ASIDE",
+    ] {
+        let body = nsh
+            .split(group)
+            .nth(1)
+            .unwrap()
+            .split("!macroend")
+            .next()
+            .unwrap();
+        let measured = body.find("${If} $R7 <= 260").expect(group);
+        assert!(body.find("WriteRegStr").unwrap() > measured, "{group}");
+        assert!(
+            body.find("${Else}").unwrap() > body.rfind("WriteRegStr").unwrap(),
+            "{group}"
+        );
+    }
+    // A reinstall cancels every `LitePack *` value before the next logon could remove the new installation's files.
     let cancel = nsh
         .split("!macro LPK_CANCEL_PENDING_RUNONCE")
         .nth(1)
         .and_then(|s| s.split("!macroend").next())
         .unwrap();
-    assert!(cancel.contains(r#"DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack uninstall""#));
-    assert!(cancel.contains(r#"DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack bin""#));
+    assert!(cancel.contains("StrCpy $R7 $R6 9"));
+    assert!(cancel.contains(r#"${If} $R7 == "LitePack ""#));
 }
 
 #[test]

@@ -65,16 +65,16 @@ SectionEnd
 ; A LitePack RunOnce command left by an earlier uninstall or upgrade (a shell DLL Explorer held): a reinstall
 ; before the next logon cancels them, so none can remove the new installation's files.
 !macro LPK_CANCEL_PENDING_RUNONCE
-  DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack uninstall"
-  DeleteRegValue HKCU "${LPK_RUNONCE}" "LitePack bin"
+  ; Every value named `LitePack *` (R335: `LitePack uninstall <n>`, `LitePack shell <version> <n>`,
+  ; `LitePack bin <n>`).
   StrCpy $R5 0
   ${Do}
     EnumRegValue $R6 HKCU "${LPK_RUNONCE}" $R5
     ${If} $R6 == ""
       ${Break}
     ${EndIf}
-    StrCpy $R7 $R6 15
-    ${If} $R7 == "LitePack shell "
+    StrCpy $R7 $R6 9
+    ${If} $R7 == "LitePack "
       DeleteRegValue HKCU "${LPK_RUNONCE}" $R6
     ${Else}
       IntOp $R5 $R5 + 1
@@ -82,18 +82,39 @@ SectionEnd
   ${Loop}
 !macroend
 
-; The next-logon removal of one shell\<version> folder Explorer still holds, under the RunOnce value `name`: the DLL,
-; then the empty folders up to $INSTDIR, each non-recursively (no `rmdir /s`: nothing else is ever deleted).
+; R335: Windows runs a Run/RunOnce command line of at most 260 characters, so each next-logon cleanup is one value
+; per action, named `<group> <n>` in the order they must run (values run in the order they were written, which is
+; also their name order). The group's longest command (its `del`) is measured first: over 260 characters (a very long
+; install path), no value of the group is written, and the next install's cleanup removes the leftover instead.
+!define LPK_CMD '"$SYSDIR\cmd.exe" /d /c'
+
+; One shell\<version> folder Explorer still holds: the DLL, then the empty folders up to $INSTDIR, each
+; non-recursively (no `rmdir /s`: nothing else is ever deleted).
 !macro LPK_RUNONCE_REMOVE_SHELL name version
-  WriteRegStr HKCU "${LPK_RUNONCE}" "${name}" \
-    '"$SYSDIR\cmd.exe" /d /c del /f /q "$INSTDIR\shell\${version}\lpk_shell.dll" & rmdir "$INSTDIR\shell\${version}" & rmdir "$INSTDIR\shell" & rmdir "$INSTDIR"'
+  StrCpy $R8 '${LPK_CMD} del /f /q "$INSTDIR\shell\${version}\lpk_shell.dll"'
+  StrLen $R7 $R8
+  ${If} $R7 <= 260
+    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 1" $R8
+    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 2" '${LPK_CMD} rmdir "$INSTDIR\shell\${version}"'
+    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 3" '${LPK_CMD} rmdir "$INSTDIR\shell"'
+    WriteRegStr HKCU "${LPK_RUNONCE}" "${name} 4" '${LPK_CMD} rmdir "$INSTDIR"'
+  ${Else}
+    DetailPrint "LitePack: the install path is too long for a RunOnce command; shell\${version} stays until the next install"
+  ${EndIf}
 !macroend
 
-; The next-logon removal of bin\'s set-aside executables (below) that a process still held at uninstall: those files,
-; then bin\ and $INSTDIR when empty, each non-recursively. A value of its own, so the command stays short.
+; bin\'s set-aside executables (below) that a process still held at uninstall: those files, then bin\ and $INSTDIR
+; when empty, each non-recursively.
 !macro LPK_RUNONCE_REMOVE_SET_ASIDE
-  WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin" \
-    '"$SYSDIR\cmd.exe" /d /c del /f /q "$INSTDIR\bin\*.old-*" & rmdir "$INSTDIR\bin" & rmdir "$INSTDIR"'
+  StrCpy $R8 '${LPK_CMD} del /f /q "$INSTDIR\bin\*.old-*"'
+  StrLen $R7 $R8
+  ${If} $R7 <= 260
+    WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin 1" $R8
+    WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin 2" '${LPK_CMD} rmdir "$INSTDIR\bin"'
+    WriteRegStr HKCU "${LPK_RUNONCE}" "LitePack bin 3" '${LPK_CMD} rmdir "$INSTDIR"'
+  ${Else}
+    DetailPrint "LitePack: the install path is too long for a RunOnce command; bin\*.old-* stay until the next install"
+  ${EndIf}
 !macroend
 
 ; R334: an upgrade while a bin\ executable runs (an lpk.exe compressing, the workers it started). Windows refuses to
