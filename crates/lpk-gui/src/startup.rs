@@ -3,7 +3,8 @@
 //! After "Install and restart", the installer starts the new GUI about a second after the old one
 //! called `process::exit`, while the old WebView2 browser may still hold the user data folder;
 //! creating the webview can then fail for a moment. [`retry`] gives it a bounded number of
-//! further tries. [`append_crash_note`] keeps a short local record of a panic: never sent
+//! further tries. [`append_crash_note`] keeps a short local record of a panic, a failed
+//! start or a failed hand-off to the installer: never sent
 //! anywhere, at most [`CRASH_LOG_MAX`] bytes, in the local state folder the uninstaller removes.
 
 use std::path::Path;

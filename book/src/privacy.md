@@ -1,12 +1,11 @@
 # Privacy
 
-LitePack collects nothing. It has no telemetry, no analytics, no crash reports and no accounts. This page says what
+LitePack collects nothing. It has no telemetry, no analytics, no crash reports sent anywhere and no accounts. This page says what
 the code does today; it describes nothing that is planned.
 
 ## Your files
 
-Files stay on your computer. Archives are read and written locally, and nothing is uploaded. If LitePack crashes, it writes a short note (the error and where in the code it happened, the last few at most,
-under 64 KiB) to `crash.log` in its local state folder; it is never sent, and uninstalling LitePack removes it.
+Files stay on your computer. Archives are read and written locally, and nothing is uploaded.
 
 The GUI keeps some things on the computer:
 
@@ -19,7 +18,10 @@ The GUI keeps some things on the computer:
   exits (it cannot while another program still holds the copy open) and, after an earlier run that did not exit
   cleanly, removes when it next starts;
 - short-lived files that Explorer's menu writes for the GUI to read, which hold the paths you selected; the GUI
-  deletes each one after use, and deletes any left over after 24 hours.
+  deletes each one after use, and deletes any left over after 24 hours;
+- `crash.log` in its local state folder (a portable copy: its `data` folder): a short note when the GUI crashes,
+  cannot start, or cannot hand off to an update's installer, with the error, which can name a file path on this
+  computer, and where in the code it happened; the last few at most, under 64 KiB; uninstalling LitePack removes it.
 
 All of it stays on the computer and is sent nowhere.
 

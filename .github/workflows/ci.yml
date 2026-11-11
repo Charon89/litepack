@@ -1076,10 +1076,18 @@ jobs:
           grep -E ' 4689 .*-updater-[^\\]*\\[^|]*-installer\.exe [|] Exit Status:[[:space:]]*0x0' "$W/events.log" \
             || { echo "no audit record of the downloaded installer exiting with 0"; exit 1; }
           # R342: the GUI the installer's /R started is N+1's and stays up (it once panicked in setup, exit 101).
-          grep -E ' 4689 .*\\LitePack\\lpk-gui\.exe [|] Exit Status' "$W/events.log" || true
-          if [ -f "$STATE/crash.log" ]; then echo "--- crash.log"; cat "$STATE/crash.log"; fi
-          if grep -E ' 4689 .*\\LitePack\\lpk-gui\.exe [|] Exit Status:[[:space:]]*0x65' "$W/events.log"; then
-            echo "a LitePack GUI exited with 101 (a panic) after the update"; exit 1
+          # R348: a failed start exits 1 (or, without the smoke or e2e variable, waits in an alert), so a live
+          # lpk-gui.exe is not enough: every installed GUI's exit in the test's window (the audit's 4689, enabled
+          # above) has status 0, and the crash note holds no failed start and no failed hand-off.
+          echo "--- installed GUI exits (4689)"
+          grep -E ' 4689 .*[\]LitePack[\]lpk-gui\.exe [|] Exit Status' "$W/events.log" || echo "none"
+          if [ -f "$STATE/crash.log" ]; then echo "--- crash.log"; cat "$STATE/crash.log"; else echo "--- no crash.log"; fi
+          if grep -E ' 4689 .*[\]LitePack[\]lpk-gui\.exe [|] Exit Status' "$W/events.log" \
+            | grep -vE 'Exit Status:[[:space:]]*0x0+([^0-9a-fA-Fx]|$)'; then
+            echo "a LitePack GUI exited with a non-zero status after the update"; exit 1
+          fi
+          if [ -f "$STATE/crash.log" ] && grep -E 'start failed|update hand-off failed' "$STATE/crash.log"; then
+            echo "the crash note records a failed start or a failed hand-off"; exit 1
           fi
           alive="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' }).Count" | tr -d '\r')"
           echo "LitePack GUIs running after the update: $alive"
