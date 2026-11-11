@@ -72,6 +72,33 @@ struct Host {
     /// The newer version the check found, until it is installed (E7-7).
     #[cfg(feature = "updater")]
     pending_update: std::sync::Mutex<Option<Box<tauri_plugin_updater::Update>>>,
+    /// Set as the first thing the hand-off to the installer does (R348): from then on the
+    /// code-less exit that destroying the window raises is held, so the process lives until the
+    /// plugin has started the installer and ends it itself.
+    #[cfg(feature = "updater")]
+    handing_off: AtomicBool,
+}
+
+impl Host {
+    /// Whether the hand-off to the installer has begun (never in a build without the updater).
+    fn handing_off(&self) -> bool {
+        #[cfg(feature = "updater")]
+        {
+            self.handing_off.load(Ordering::SeqCst)
+        }
+        #[cfg(not(feature = "updater"))]
+        false
+    }
+}
+
+/// Whether an exit request is held (R348): one with a code never is; a code-less one is held
+/// while the hand-off to the installer runs (without asking), and otherwise when the user keeps
+/// an operation running (`may_exit`'s answer).
+fn hold_exit(code: Option<i32>, handing_off: bool, may_exit: impl FnOnce() -> bool) -> bool {
+    match code {
+        Some(_) => false,
+        None => handing_off || !may_exit(),
+    }
 }
 
 /// What `startup` tells the page.
@@ -244,7 +271,16 @@ async fn install_pending(handle: &AppHandle) -> Result<bool, GuiError> {
             Err(e @ updates::FlowError::Install(_)) => {
                 // The quit path ran (operations cancelled, perhaps the sessions closed): exit.
                 let text = strings::get("update.failed").replace("{error}", &e.to_string());
-                let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), &text);
+                if host.handing_off.load(Ordering::SeqCst)
+                    && handle.get_webview_window(MAIN_WINDOW).is_none()
+                {
+                    // R348: the window is gone, nothing is left to show it in: the note.
+                    report_failure(handle, &format!("update hand-off failed: {e}"), &text);
+                } else {
+                    // The error came before the hand-off began: the window says it.
+                    host.handing_off.store(false, Ordering::SeqCst);
+                    let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), &text);
+                }
                 handle.exit(1);
                 Err(internal(e))
             }
@@ -1124,17 +1160,24 @@ fn install_crash_note() {
 /// or the e2e log under CI, a native box otherwise) instead of Tauri's panic.
 fn start_failed(handle: &AppHandle, reason: &str) {
     let text = strings::get("app.start_failed").replace("{reason}", reason);
+    report_failure(handle, &format!("start failed: {reason}"), &text);
+}
+
+/// A failure with no page to show it in: `note` to the crash note and the e2e log, `text` to
+/// stderr and the smoke report, or a native box when neither the smoke nor the e2e variable is
+/// set.
+fn report_failure(handle: &AppHandle, note: &str, text: &str) {
     eprintln!("lpk-gui: {text}");
-    e2e_note(&format!("start failed: {reason}"));
+    e2e_note(note);
     if let Some(dir) = paths::state_dir() {
-        lpk_gui::startup::append_crash_note(&dir, &format!("start failed: {reason}"));
+        lpk_gui::startup::append_crash_note(&dir, note);
     }
     if let Some(report) = std::env::var_os(SMOKE_REPORT_ENV) {
-        if let Err(e) = std::fs::write(&report, paths::data_error_report(&text)) {
+        if let Err(e) = std::fs::write(&report, paths::data_error_report(text)) {
             eprintln!("lpk-gui: the smoke report: {e}");
         }
     } else if !e2e_armed() {
-        let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), &text);
+        let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), text);
     }
 }
 
@@ -1150,6 +1193,7 @@ fn e2e_armed() -> bool {
 }
 
 /// The longest the hand-off to the installer waits for the main window and its WebView2 to go.
+#[cfg(feature = "updater")]
 const CLOSE_FOR_INSTALL: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// R342: before the installer starts, destroy the main window, so this instance's WebView2
@@ -1317,6 +1361,8 @@ pub fn run() -> i32 {
                 exit_confirmed: AtomicBool::new(false),
                 #[cfg(feature = "updater")]
                 pending_update: std::sync::Mutex::new(None),
+                #[cfg(feature = "updater")]
+                handing_off: AtomicBool::new(false),
             });
             // The update check, once the window is up, at most once a day; off in the
             // settings, or without the release key (E7-1), it requests nothing.
@@ -1328,6 +1374,10 @@ pub fn run() -> i32 {
                     let state = paths::update_state_file();
                     let closing = handle.clone();
                     let before_exit = move || {
+                        // R348: first, so the exit the window's end raises is held.
+                        if let Some(host) = closing.try_state::<Host>() {
+                            host.handing_off.store(true, Ordering::SeqCst);
+                        }
                         if !exiting.shutdown(EXIT_JOIN) {
                             eprintln!("lpk-gui: an operation did not stop within {EXIT_JOIN:?}");
                         }
@@ -1435,7 +1485,9 @@ pub fn run() -> i32 {
                 }
                 b.build()
             };
-            lpk_gui::startup::retry(
+            let mut first: Option<String> = None;
+            let mut failed = 0u32;
+            let made = lpk_gui::startup::retry(
                 lpk_gui::startup::WEBVIEW_RETRY_INTERVAL,
                 lpk_gui::startup::WEBVIEW_RETRY_FOR,
                 attempt,
@@ -1443,14 +1495,30 @@ pub fn run() -> i32 {
                     let line = format!("the main window, try {n}: {e}");
                     eprintln!("lpk-gui: {line}");
                     e2e_note(&line);
-                    // In words where CI and a support request can read it (a windowed exe's stderr
-                    // goes nowhere): the local, bounded crash note.
-                    if let Some(dir) = paths::state_dir() {
-                        lpk_gui::startup::append_crash_note(&dir, &line);
-                    }
+                    failed = n;
+                    first.get_or_insert_with(|| e.to_string());
                 },
                 std::thread::sleep,
-            )?;
+            );
+            // R348: one crash note per start, and only when a retry happened (a windowed exe's
+            // stderr goes nowhere; CI and a support request can read the note). A start that
+            // fails carries the tries in its start-failed note.
+            match made {
+                Ok(_) => {
+                    if let Some(note) = lpk_gui::startup::retry_note(failed + 1, first.as_deref()) {
+                        if let Some(dir) = paths::state_dir() {
+                            lpk_gui::startup::append_crash_note(&dir, &note);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let reason = match lpk_gui::startup::retry_note(failed, first.as_deref()) {
+                        Some(note) => format!("{e} ({note})"),
+                        None => e.to_string(),
+                    };
+                    return Err(reason.into());
+                }
+            }
             Ok(())
             })();
             if let Err(e) = result {
@@ -1497,8 +1565,8 @@ pub fn run() -> i32 {
             push(&host, Notice::Dropped { items });
         }
         RunEvent::ExitRequested { code, api, .. } => {
-            if let (None, Some(host)) = (code, handle.try_state::<Host>()) {
-                if !may_exit(handle, &host) {
+            if let Some(host) = handle.try_state::<Host>() {
+                if hold_exit(code, host.handing_off(), || may_exit(handle, &host)) {
                     api.prevent_exit();
                 }
             }
@@ -1511,6 +1579,28 @@ pub fn run() -> i32 {
         }
         _ => {}
     })
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::hold_exit;
+
+    #[test]
+    fn a_hand_off_holds_a_code_less_exit_without_asking() {
+        assert!(hold_exit(None, true, || panic!("asked during a hand-off")));
+    }
+
+    #[test]
+    fn an_exit_with_a_code_is_never_held() {
+        assert!(!hold_exit(Some(0), true, || panic!("asked")));
+        assert!(!hold_exit(Some(1), false, || panic!("asked")));
+    }
+
+    #[test]
+    fn without_a_hand_off_the_user_decides() {
+        assert!(!hold_exit(None, false, || true));
+        assert!(hold_exit(None, false, || false));
+    }
 }
 
 #[cfg(test)]

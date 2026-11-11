@@ -98,10 +98,31 @@ pub fn append_crash_note(dir: &Path, entry: &str) {
     let _ = std::fs::write(&file, bounded_crash_log(&existing, entry));
 }
 
+/// The one crash note a start writes about the main window's tries (R348): the number of tries
+/// and the first error, only when a retry happened (`tries` above one); `None` otherwise.
+pub fn retry_note(tries: u32, first: Option<&str>) -> Option<String> {
+    match first {
+        Some(e) if tries > 1 => Some(format!(
+            "the main window took {tries} tries, the first failed: {e}"
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn one_retry_note_per_start_only_after_a_retry() {
+        assert_eq!(retry_note(1, None), None);
+        assert_eq!(retry_note(1, Some("busy")), None);
+        assert_eq!(
+            retry_note(4, Some("busy")).as_deref(),
+            Some("the main window took 4 tries, the first failed: busy")
+        );
+    }
 
     #[test]
     fn retry_succeeds_after_failures() {
