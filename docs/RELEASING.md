@@ -35,6 +35,71 @@ The GUI is a Tauri 2 app with no Node toolchain: static files in `apps/gui/`, th
 The icons in `crates/lpk-gui/icons` are a generated placeholder (`icons/make-placeholder.py`, then
 `cargo tauri icon`); the final set is the owner's (PLAN E5 decision (e)).
 
+## The updater (E7-7)
+
+`tauri-plugin-updater` =2.14.1, called from Rust alone (`crates/lpk-gui/src/updates.rs`; the plain-Rust parts in
+`crates/lpk-gui/src/update.rs`). Design: `docs/notes/e7-design.md` section 6.
+
+- **Endpoint and key.** `tauri.conf.json`'s `plugins.updater`: one HTTPS endpoint,
+  `https://github.com/Charon89/litepack/releases/latest/download/latest.json`, `requireSignedVersion: true`,
+  `windows.installMode: passive`, no `allowDowngrades` and no `dangerous*` option (a config test asserts all of
+  this). The `pubkey` stays a placeholder until E7-1 supplies the owner's minisign public key; until then the gate
+  makes no request at all.
+- **Flow.** With **Check for updates** on, the check runs once the window is up, at most once a day: the day is
+  recorded in `update.json` in the local state folder before the request, so a failed check waits for tomorrow;
+  when the day cannot be recorded (no state folder, a failed write) no check is made. The day is the UTC day of the
+  system clock, so a clock set back (or forward) to another day can check again that day.
+  A newer version shows its notes with **Install and restart**, **Later** (dismiss) and **Skip this version** (the
+  version the check found, never one the page names, is stored in `update.json`; it is not offered again, a newer one
+  is). Nothing installs without the first, which runs in this order (`updates::install_flow`, R323): the download
+  and its verification first, so a failed or timed-out download leaves the GUI as it was; then the quit path (asks
+  while an operation runs, then cancels; if the user keeps the operation, nothing installs and nothing is
+  cancelled); then the plugin's `on_before_exit` closes the sessions and `install` starts the NSIS installer with
+  `/P /UPDATE`, plus `/R` (restart) only when LitePack was started without arguments, since `/R` passes the launch's
+  arguments on (`/ARGS`) and would replay a verb such as `--extract-here`; after a launch with arguments the user
+  starts LitePack again. Then the process exits. If the installer does not start once the quit path has run, the GUI
+  says so and exits rather than stay half-closed. Per user, no UAC.
+  With the setting off, nothing is requested and `update.json` is not written.
+- **The release prefix.** Before any download, a `url` outside `https://github.com/Charon89/litepack/releases/download/`
+  is refused (`lpk_gui::update::RELEASE_DOWNLOAD_PREFIX`, built from the one `REPOSITORY` constant). The comparison is
+  byte for byte on the parsed URL: no case folding of the path, and nothing but a path may follow the prefix.
+- **Verification.** The plugin checks the downloaded installer's minisign signature against the compiled-in key, and
+  with `requireSignedVersion` that the signature's trusted comment names the announced version (CVE-2026-95625).
+- **Timeouts.** The check: 30 s (`CHECK_TIMEOUT`). The download: 10 minutes for the whole installer
+  (`DOWNLOAD_TIMEOUT`).
+- **Portable copies** (the `portable` marker) only notify: the notice links to
+  `https://github.com/Charon89/litepack/releases/latest`; they never download or install, since the installer would
+  turn the portable copy into an installed one.
+- **The Store build** (E7-4) turns the `updater` cargo feature off (`--no-default-features`): its tree has no
+  `tauri-plugin-updater` (`crates/lpk-gui/tests/updater_feature.rs` runs `cargo tree`), and the GUI shows no update
+  setting. The Store updates it.
+- **Test keys.** The tests (`updates.rs`) generate a minisign key pair at test time with the `minisign` dev-dependency
+  (MIT), sign their manifests and payloads in memory, and serve them from a local server on `127.0.0.1` with plain
+  HTTP allowed by the test configuration alone. No key, public or secret, of the tests is committed, so E7-1's
+  `git log --all -S` for the secret-key header finds nothing. The tests cover: a correctly signed newer release
+  verifies; a bad signature in the manifest, a tampered payload, and a validly signed older release announced as a
+  newer version are each refused; a `url` off the release prefix is refused before any download (the server sees
+  only `latest.json`); with the check off, the server sees no request; and the check runs once a day and does not
+  offer a skipped version.
+- **End to end (test 6, CI job `updater-e2e`).** Two test installers, N (0.0.1) and N+1 (0.0.2), built with the
+  `update-e2e` feature and `tauri.update-e2e.conf.json` chained after `tauri.nsis.conf.json` (tauri-cli 2.12.4 takes
+  `--config` more than once), hold a key pair the job generates with `tauri signer generate` and deletes at its end.
+  N+1 is signed with `tauri signer sign --app-version 0.0.2` and served with `latest.json` from a Python server on
+  `127.0.0.1:8737`. A payload with one byte flipped is refused first (nothing installs); then the hook
+  (`LPK_GUI_UPDATE_E2E`) presses Install, and the job requires the steps check, download, verified, quit, install in
+  that order, N+1's binaries, the registration and `Path`, the settings kept, and no residue after the uninstall.
+  No shipped build holds the hook or the overlay: the `gui` job greps the release exe.
+- **Startup after the update (R342).** tauri-bundler patches the bundle type into the packed `lpk-gui.exe`, so the job
+  compares its hash with the token turned back (`scripts/e7-bundled-hash.py`), and it tracks the installer by process
+  audit (started by `lpk-gui.exe` with `/P /UPDATE`, exit 0). Before the hand-off the GUI destroys its window (bounded,
+  1.5 s), so its WebView2 releases the data folder; the new GUI retries its webview every 500 ms for 10 s, and a
+  setup failure shows "LitePack could not start" and exits 1 instead of Tauri's panic (exit 101). A panic, a failed
+  start or a failed hand-off to the installer (R348: the process is held until the installer starts) appends a
+  bounded local note to `crash.log` in the local state folder (portable: `data\`): the error, which can name a file
+  path, and where in the code it happened; the last 8 at most, under 64 KiB; nothing is sent, and the uninstaller
+  removes the folder. Test 6 fails on such a note, and on any non-zero exit of the installed `lpk-gui.exe` (4689).
+- **Signing `latest.json`.** The owner's offline step (`scripts/updater-sign.sh`) belongs to E7-2.
+
 ## Licence checks of the GUI
 
 `cargo deny check` excludes `lpk-gui`, whose tree `crates/lpk-gui/deny.toml` checks for the Windows triples

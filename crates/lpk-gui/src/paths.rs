@@ -101,6 +101,11 @@ pub fn recents_file() -> Option<PathBuf> {
     state_dir().map(|d| d.join("recents.json"))
 }
 
+/// The updater's state (E7-7): the last check's day and the skipped version, Rust's alone.
+pub fn update_state_file() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("update.json"))
+}
+
 /// WebView2's user data folder.
 pub fn webview_dir() -> Option<PathBuf> {
     state_dir().map(|d| d.join("WebView2"))

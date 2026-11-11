@@ -46,6 +46,7 @@ use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WindowEvent};
 use zeroize::Zeroizing;
 
+#[cfg(feature = "updater")]
 use crate::updates;
 
 /// How long the exit waits for the runs it cancelled.
@@ -68,6 +69,36 @@ struct Host {
     /// Second instances' command lines, handled one at a time in arrival order.
     forwarder: Forwarder<(Vec<String>, String)>,
     exit_confirmed: AtomicBool,
+    /// The newer version the check found, until it is installed (E7-7).
+    #[cfg(feature = "updater")]
+    pending_update: std::sync::Mutex<Option<Box<tauri_plugin_updater::Update>>>,
+    /// Set as the first thing the hand-off to the installer does (R348): from then on the
+    /// code-less exit that destroying the window raises is held, so the process lives until the
+    /// plugin has started the installer and ends it itself.
+    #[cfg(feature = "updater")]
+    handing_off: AtomicBool,
+}
+
+impl Host {
+    /// Whether the hand-off to the installer has begun (never in a build without the updater).
+    fn handing_off(&self) -> bool {
+        #[cfg(feature = "updater")]
+        {
+            self.handing_off.load(Ordering::SeqCst)
+        }
+        #[cfg(not(feature = "updater"))]
+        false
+    }
+}
+
+/// Whether an exit request is held (R348): one with a code never is; a code-less one is held
+/// while the hand-off to the installer runs (without asking), and otherwise when the user keeps
+/// an operation running (`may_exit`'s answer).
+fn hold_exit(code: Option<i32>, handing_off: bool, may_exit: impl FnOnce() -> bool) -> bool {
+    match code {
+        Some(_) => false,
+        None => handing_off || !may_exit(),
+    }
 }
 
 /// What `startup` tells the page.
@@ -82,6 +113,8 @@ struct StartupInfo {
     notices: Vec<StartupNotice>,
     /// Why the settings file was not used, if it was not (shown once, as a notice).
     settings_warning: Option<String>,
+    /// Whether this build has the updater (off in the Store build: no update setting shown).
+    updater: bool,
 }
 
 /// Pushed to the page's `subscribe` channel.
@@ -94,8 +127,17 @@ enum Notice {
     Activated { activation: Activation },
     /// A second instance's command line that does not parse.
     Refused { error: String },
-    /// The update check found a newer version (E7-7 adds the install).
-    Update { version: String },
+    /// The update check found a newer version: its notes, and whether this copy may install it
+    /// (a portable copy only links to the release page).
+    #[cfg_attr(not(feature = "updater"), allow(dead_code))]
+    Update {
+        version: String,
+        notes: String,
+        portable: bool,
+        /// Whether the installer starts LitePack again (a launch without arguments); the
+        /// button then reads "Install and restart", else "Install and close".
+        restart: bool,
+    },
 }
 
 /// A progress event as the page sees it.
@@ -124,6 +166,9 @@ async fn blocking<T: Send + 'static>(
 
 #[tauri::command]
 async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
+    // R358: the page has loaded and asked for its start-up data: the test hook may press now.
+    #[cfg(feature = "update-e2e")]
+    lpk_gui::security::update_e2e::mark_page_ready();
     Ok(StartupInfo {
         strings: strings::table(),
         activation: host.startup.clone(),
@@ -131,7 +176,157 @@ async fn startup(host: State<'_, Host>) -> Result<StartupInfo, GuiError> {
         recovered: host.recovered,
         notices: host.notices.clone(),
         settings_warning: host.settings_warning.clone(),
+        updater: cfg!(feature = "updater"),
     })
+}
+
+/// "Install and restart" (E7-7; `docs/notes/e7-design.md` section 6, R323), in
+/// `updates::install_flow`'s order: the download from the release prefix, checked against the
+/// compiled-in key and the signed version; only then the quit path (ask while an operation
+/// runs, then cancel); then the plugin closes the sessions (`on_before_exit`), starts the
+/// installer with `/P /UPDATE` (and `/R` only for a launch without arguments) and ends the
+/// process. `false` when the user kept an operation running: nothing installs, nothing was
+/// cancelled. A portable copy never downloads. If the installer does not start after the quit
+/// path ran, the GUI says so and exits (it is not left half-closed).
+#[tauri::command]
+async fn update_install(handle: AppHandle, host: State<'_, Host>) -> Result<bool, GuiError> {
+    #[cfg(feature = "updater")]
+    {
+        let _ = host;
+        install_pending(&handle).await
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        let _ = (handle, host);
+        Err(GuiError::usage("this build of LitePack has no updater"))
+    }
+}
+
+/// The prefix downloads must start with: the repository's release assets; in the `update-e2e`
+/// test build alone, the local server's (R327).
+#[cfg(feature = "updater")]
+fn download_prefix() -> &'static str {
+    #[cfg(feature = "update-e2e")]
+    {
+        lpk_gui::security::update_e2e::LOCAL_PREFIX
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    {
+        lpk_gui::update::RELEASE_DOWNLOAD_PREFIX
+    }
+}
+
+/// A step of the install flow: written to the hook's log in the `update-e2e` test build alone
+/// (the end-to-end job checks their order); nothing in any other build.
+#[cfg(feature = "updater")]
+fn e2e_step(step: &str) {
+    #[cfg(feature = "update-e2e")]
+    {
+        use lpk_gui::security::update_e2e;
+        let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
+        if let Some(log) = update_e2e::armed(var.as_deref()) {
+            update_e2e::log(&log, &format!("step {step}"));
+        }
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    let _ = step;
+}
+
+/// "Install and restart" on the update the check found (the command, and the `update-e2e`
+/// hook).
+#[cfg(feature = "updater")]
+async fn install_pending(handle: &AppHandle) -> Result<bool, GuiError> {
+    let host = handle.state::<Host>();
+    {
+        let update = host
+            .pending_update
+            .lock()
+            .map_err(internal)?
+            .clone()
+            .ok_or_else(|| GuiError::usage("no update is waiting"))?;
+        let quit_handle = handle.clone();
+        let quit = || async move {
+            let h = quit_handle.clone();
+            blocking(move || Ok(may_exit(&h, &h.state::<Host>())))
+                .await
+                .unwrap_or(false)
+        };
+        let install = |bytes: Vec<u8>| {
+            let update = update.clone();
+            async move {
+                tauri::async_runtime::spawn_blocking(move || update.install(bytes))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())
+            }
+        };
+        let flow = updates::install_flow(
+            &update,
+            download_prefix(),
+            paths::dirs().portable,
+            quit,
+            install,
+            e2e_step,
+        )
+        .await;
+        match flow {
+            Ok(installed) => Ok(installed),
+            Err(e @ updates::FlowError::Install(_)) => {
+                // The quit path ran (operations cancelled, perhaps the sessions closed): exit.
+                let text = strings::get("update.failed").replace("{error}", &e.to_string());
+                if host.handing_off.load(Ordering::SeqCst)
+                    && handle.get_webview_window(MAIN_WINDOW).is_none()
+                {
+                    // R348: the window is gone, nothing is left to show it in: the note.
+                    report_failure(handle, &format!("update hand-off failed: {e}"), &text);
+                } else {
+                    // The error came before the hand-off began: the window says it.
+                    host.handing_off.store(false, Ordering::SeqCst);
+                    let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), &text);
+                }
+                handle.exit(1);
+                Err(internal(e))
+            }
+            Err(e) => Err(GuiError::usage(e.to_string())),
+        }
+    }
+}
+
+/// "Skip this version": the version the check found (never one from the page) is not offered
+/// again; a newer one is.
+#[tauri::command]
+async fn update_skip(host: State<'_, Host>) -> Result<(), GuiError> {
+    #[cfg(feature = "updater")]
+    {
+        let version = host
+            .pending_update
+            .lock()
+            .map_err(internal)?
+            .as_ref()
+            .map(|u| u.version.clone())
+            .ok_or_else(|| GuiError::usage("no update is waiting"))?;
+        let file = paths::update_state_file()
+            .ok_or_else(|| GuiError::usage("LitePack has no state folder"))?;
+        blocking(move || {
+            let mut state = lpk_gui::update::State::load(&file);
+            state.skipped = Some(version);
+            state.save(&file).map_err(internal)
+        })
+        .await
+    }
+    #[cfg(not(feature = "updater"))]
+    {
+        let _ = host;
+        Err(GuiError::usage("this build of LitePack has no updater"))
+    }
+}
+
+/// Open the release page (a portable copy's update notice): one fixed address, never one from
+/// the page.
+#[tauri::command]
+async fn open_release_page() -> Result<(), GuiError> {
+    blocking(|| lpk_gui_sys::open_release_page(lpk_gui::update::RELEASES_PAGE).map_err(internal))
+        .await
 }
 
 /// The settings the page shows (no path among them, `lpk_gui::settings`).
@@ -922,6 +1117,114 @@ fn may_exit(handle: &AppHandle, host: &Host) -> bool {
     yes
 }
 
+/// A line in the `update-e2e` hook's log, in that test build alone (nothing in any other).
+fn e2e_note(line: &str) {
+    #[cfg(feature = "update-e2e")]
+    {
+        use lpk_gui::security::update_e2e;
+        let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
+        if let Some(log) = update_e2e::armed(var.as_deref()) {
+            update_e2e::log(&log, line);
+        }
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    let _ = line;
+}
+
+/// R342: a panic leaves a short local note in the local state folder (`crash.log`; portable:
+/// `data\`), bounded and never sent anywhere; then the previous hook runs as before.
+fn install_crash_note() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".to_owned());
+        let entry = format!(
+            "{} lpk-gui {}: {what} at {at}",
+            lpk_gui::update::today(),
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Some(dir) = paths::state_dir() {
+            lpk_gui::startup::append_crash_note(&dir, &entry);
+        }
+        e2e_note(&format!("panic {entry}"));
+        previous(info);
+    }));
+}
+
+/// R342: the window could not be made, or another setup step failed: say so (the smoke report
+/// or the e2e log under CI, a native box otherwise) instead of Tauri's panic.
+fn start_failed(handle: &AppHandle, reason: &str) {
+    let text = strings::get("app.start_failed").replace("{reason}", reason);
+    // R358: this instance has no window: stop being the single instance before the alert waits,
+    // so a launch meanwhile starts its own instance instead of being forwarded here to nothing.
+    tauri_plugin_single_instance::destroy(handle);
+    report_failure(handle, &format!("start failed: {reason}"), &text);
+}
+
+/// A failure with no page to show it in: `note` to the crash note and the e2e log, `text` to
+/// stderr and the smoke report, or a native box when neither the smoke nor the e2e variable is
+/// set.
+fn report_failure(handle: &AppHandle, note: &str, text: &str) {
+    eprintln!("lpk-gui: {text}");
+    e2e_note(note);
+    if let Some(dir) = paths::state_dir() {
+        lpk_gui::startup::append_crash_note(&dir, note);
+    }
+    if let Some(report) = std::env::var_os(SMOKE_REPORT_ENV) {
+        if let Err(e) = std::fs::write(&report, paths::data_error_report(text)) {
+            eprintln!("lpk-gui: the smoke report: {e}");
+        }
+    } else if !e2e_armed() {
+        let _ = lpk_gui_sys::alert(owner(handle), strings::get("app.title"), text);
+    }
+}
+
+/// Whether the `update-e2e` hook's log is set (that test build alone).
+fn e2e_armed() -> bool {
+    #[cfg(feature = "update-e2e")]
+    {
+        use lpk_gui::security::update_e2e;
+        update_e2e::armed(std::env::var_os(update_e2e::UPDATE_E2E_ENV).as_deref()).is_some()
+    }
+    #[cfg(not(feature = "update-e2e"))]
+    false
+}
+
+/// The longest the hand-off to the installer waits for the main window and its WebView2 to go.
+#[cfg(feature = "updater")]
+const CLOSE_FOR_INSTALL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// R342: before the installer starts, destroy the main window, so this instance's WebView2
+/// releases the user data folder the new one opens; bounded, it never holds the exit long.
+#[cfg(feature = "updater")]
+fn close_main_window(handle: &AppHandle) {
+    let Some(w) = handle.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    if let Err(e) = w.destroy() {
+        eprintln!("lpk-gui: closing the window for the installer: {e}");
+        return;
+    }
+    let start = std::time::Instant::now();
+    while handle.get_webview_window(MAIN_WINDOW).is_some() && start.elapsed() < CLOSE_FOR_INSTALL {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // The browser process ends after its last webview: the rest of the bound for it.
+    std::thread::sleep(
+        CLOSE_FOR_INSTALL
+            .saturating_sub(start.elapsed())
+            .min(std::time::Duration::from_millis(700)),
+    );
+}
+
 /// The exit code of a portable copy whose `data` folder is unusable.
 const PORTABLE_DATA_UNUSABLE: i32 = 1;
 
@@ -942,6 +1245,7 @@ fn refuse_portable(error: &str) -> i32 {
 
 /// Run the GUI; the process's exit code.
 pub fn run() -> i32 {
+    install_crash_note();
     // E6-4: `--register-shell` and `--unregister-shell` first of all: no window, no webview, no
     // single-instance plugin (never forwarded to a running instance); they exit with a code.
     let literal: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
@@ -970,12 +1274,15 @@ pub fn run() -> i32 {
     );
     let setup_app = app.clone();
 
-    let built = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // First: a second instance forwards its verbs here and exits before anything else runs.
         .plugin(tauri_plugin_single_instance::init(|handle, argv, cwd| {
             second_instance(handle, argv, cwd)
-        }))
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        }));
+    // The updater only in a build with the `updater` feature (not the Store's, E7-4).
+    #[cfg(feature = "updater")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let built = builder
         .invoke_handler(tauri::generate_handler![
             startup,
             settings,
@@ -1014,8 +1321,13 @@ pub fn run() -> i32 {
             rollback_run,
             append_plan,
             append_run,
+            update_install,
+            update_skip,
+            open_release_page,
         ])
         .setup(move |a| {
+            let handle = a.handle().clone();
+            let result = (move || -> Result<(), Box<dyn std::error::Error>> {
             let app = setup_app;
             // The previous run's interrupted writes, before anything new starts (this is the one
             // instance); and the folders of entries an earlier run opened, if its process ended.
@@ -1053,33 +1365,119 @@ pub fn run() -> i32 {
                 outbox: Outbox::new(),
                 forwarder,
                 exit_confirmed: AtomicBool::new(false),
+                #[cfg(feature = "updater")]
+                pending_update: std::sync::Mutex::new(None),
+                #[cfg(feature = "updater")]
+                handing_off: AtomicBool::new(false),
             });
-            // The update check, once the window is up; off in the settings, or without the
-            // release key (E7-7), it requests nothing.
-            let handle = a.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match updates::check(&handle, check).await {
-                    updates::Outcome::Available(version) => {
-                        if let Some(host) = handle.try_state::<Host>() {
-                            push(&host, Notice::Update { version });
+            // The update check, once the window is up, at most once a day; off in the
+            // settings, or without the release key (E7-1), it requests nothing.
+            #[cfg(feature = "updater")]
+            {
+                let handle = a.handle().clone();
+                let exiting = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = paths::update_state_file();
+                    let closing = handle.clone();
+                    let before_exit = move || {
+                        // R348: first, so the exit the window's end raises is held.
+                        if let Some(host) = closing.try_state::<Host>() {
+                            host.handing_off.store(true, Ordering::SeqCst);
                         }
+                        if !exiting.shutdown(EXIT_JOIN) {
+                            eprintln!("lpk-gui: an operation did not stop within {EXIT_JOIN:?}");
+                        }
+                        close_main_window(&closing);
+                    };
+                    let today = lpk_gui::update::today();
+                    // `/R` replays the launch's arguments: no restart after a launch with a verb.
+                    let args: Vec<_> = std::env::args_os().collect();
+                    let restart = lpk_gui::update::restart_after_install(&args);
+                    match updates::scheduled(
+                        &handle,
+                        check,
+                        state.as_deref(),
+                        today,
+                        restart,
+                        before_exit,
+                    )
+                    .await
+                    {
+                        updates::Outcome::Available(update) => {
+                            if let Some(host) = handle.try_state::<Host>() {
+                                let notice = Notice::Update {
+                                    version: update.version.clone(),
+                                    notes: update.body.clone().unwrap_or_default(),
+                                    portable: lpk_gui::update::mode(paths::dirs().portable)
+                                        == lpk_gui::update::Mode::NotifyOnly,
+                                    restart,
+                                };
+                                #[cfg(feature = "update-e2e")]
+                                let found = update.version.clone();
+                                if let Ok(mut p) = host.pending_update.lock() {
+                                    *p = Some(update);
+                                }
+                                push(&host, notice);
+                                // The test build's hook presses "Install and restart" (R327).
+                                #[cfg(feature = "update-e2e")]
+                                {
+                                    use lpk_gui::security::update_e2e;
+                                    let var = std::env::var_os(update_e2e::UPDATE_E2E_ENV);
+                                    if let Some(log) = update_e2e::armed(var.as_deref()) {
+                                        update_e2e::log(&log, &format!("step check found {found}"));
+                                        // R358: only once a user could press it: the main
+                                        // window up and its page loaded (bounded).
+                                        let probe = handle.clone();
+                                        let waited = tauri::async_runtime::spawn_blocking(move || {
+                                            update_e2e::wait_until(
+                                                update_e2e::PAGE_READY_FOR,
+                                                update_e2e::PAGE_READY_POLL,
+                                                || {
+                                                    probe.get_webview_window(MAIN_WINDOW).is_some()
+                                                        && update_e2e::page_ready()
+                                                },
+                                                std::thread::sleep,
+                                            )
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                        match waited {
+                                            Some(after) => {
+                                                update_e2e::log(
+                                                    &log,
+                                                    &format!("page ready after {} ms", after.as_millis()),
+                                                );
+                                                let out = install_pending(&handle).await;
+                                                update_e2e::log(&log, &format!("outcome {out:?}"));
+                                            }
+                                            None => update_e2e::log(
+                                                &log,
+                                                &format!(
+                                                    "page not ready within {} s: nothing installed",
+                                                    update_e2e::PAGE_READY_FOR.as_secs()
+                                                ),
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        updates::Outcome::Failed(e) => {
+                            e2e_step(&format!("check failed: {e}"));
+                            eprintln!("lpk-gui: the update check: {e}")
+                        }
+                        updates::Outcome::Unrecorded(e) => {
+                            eprintln!("lpk-gui: the update check was skipped, its day could not be recorded: {e}")
+                        }
+                        _ => {}
                     }
-                    updates::Outcome::Failed(e) => eprintln!("lpk-gui: the update check: {e}"),
-                    _ => {}
-                }
-            });
-            let mut b = tauri::WebviewWindowBuilder::new(
-                a,
-                MAIN_WINDOW,
-                WebviewUrl::App("index.html".into()),
-            )
-            .title(strings::get("app.title"))
-            .inner_size(960.0, 640.0)
-            .min_inner_size(480.0, 320.0)
-            .theme(window_theme(theme));
-            if let Some(d) = paths::webview_dir() {
-                b = b.data_directory(d);
+                });
             }
+            #[cfg(not(feature = "updater"))]
+            let _ = check;
+            #[allow(unused_mut)]
+            let mut browser_args: Option<String> = None;
             // E5-11: the Edge WebDriver's arguments, only in a `webdriver` build (CI's driver
             // harness; never shipped) and only when the harness asks for them.
             #[cfg(feature = "webdriver")]
@@ -1099,12 +1497,74 @@ pub fn run() -> i32 {
                     let _ = std::fs::write(log, line);
                 }
                 match outcome {
-                    Ok(Some(args)) => b = b.additional_browser_args(&args),
+                    Ok(Some(args)) => browser_args = Some(args.to_string()),
                     Ok(None) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
-            b.build()?;
+            // R342: a fresh builder per try; the old instance's WebView2 may still hold the user
+            // data folder for a moment after "Install and restart".
+            let window_app: &tauri::App = a;
+            let attempt = || {
+                let mut b = tauri::WebviewWindowBuilder::new(
+                    window_app,
+                    MAIN_WINDOW,
+                    WebviewUrl::App("index.html".into()),
+                )
+                .title(strings::get("app.title"))
+                .inner_size(960.0, 640.0)
+                .min_inner_size(480.0, 320.0)
+                .theme(window_theme(theme));
+                if let Some(d) = paths::webview_dir() {
+                    b = b.data_directory(d);
+                }
+                if let Some(args) = &browser_args {
+                    b = b.additional_browser_args(args);
+                }
+                b.build()
+            };
+            let mut first: Option<String> = None;
+            let mut failed = 0u32;
+            // R358: up to 30 s while the old instance's WebView2 still holds the folder
+            // ("in use"), 10 s for any other error.
+            let made = lpk_gui::startup::retry(
+                lpk_gui::startup::WEBVIEW_RETRY_INTERVAL,
+                attempt,
+                |e, spent| lpk_gui::startup::webview_retry(&e.to_string(), spent),
+                |n, e| {
+                    let line = format!("the main window, try {n}: {e}");
+                    eprintln!("lpk-gui: {line}");
+                    e2e_note(&line);
+                    failed = n;
+                    first.get_or_insert_with(|| e.to_string());
+                },
+                std::thread::sleep,
+            );
+            // R348: one crash note per start, and only when a retry happened (a windowed exe's
+            // stderr goes nowhere; CI and a support request can read the note). A start that
+            // fails carries the tries in its start-failed note.
+            match made {
+                Ok(_) => {
+                    if let Some(note) = lpk_gui::startup::retry_note(failed + 1, first.as_deref()) {
+                        if let Some(dir) = paths::state_dir() {
+                            lpk_gui::startup::append_crash_note(&dir, &note);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let reason = match lpk_gui::startup::retry_note(failed, first.as_deref()) {
+                        Some(note) => format!("{e} ({note})"),
+                        None => e.to_string(),
+                    };
+                    return Err(reason.into());
+                }
+            }
+            Ok(())
+            })();
+            if let Err(e) = result {
+                start_failed(&handle, &e.to_string());
+                handle.exit(1);
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -1145,9 +1605,10 @@ pub fn run() -> i32 {
             push(&host, Notice::Dropped { items });
         }
         RunEvent::ExitRequested { code, api, .. } => {
-            let host = handle.state::<Host>();
-            if code.is_none() && !may_exit(handle, &host) {
-                api.prevent_exit();
+            if let Some(host) = handle.try_state::<Host>() {
+                if hold_exit(code, host.handing_off(), || may_exit(handle, &host)) {
+                    api.prevent_exit();
+                }
             }
         }
         RunEvent::Exit => {
@@ -1158,6 +1619,28 @@ pub fn run() -> i32 {
         }
         _ => {}
     })
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::hold_exit;
+
+    #[test]
+    fn a_hand_off_holds_a_code_less_exit_without_asking() {
+        assert!(hold_exit(None, true, || panic!("asked during a hand-off")));
+    }
+
+    #[test]
+    fn an_exit_with_a_code_is_never_held() {
+        assert!(!hold_exit(Some(0), true, || panic!("asked")));
+        assert!(!hold_exit(Some(1), false, || panic!("asked")));
+    }
+
+    #[test]
+    fn without_a_hand_off_the_user_decides() {
+        assert!(!hold_exit(None, false, || true));
+        assert!(hold_exit(None, false, || false));
+    }
 }
 
 #[cfg(test)]

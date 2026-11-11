@@ -1,0 +1,102 @@
+//! E7-7 (R320): the updater is compiled out by the `updater` feature (on by default). The Store
+//! build (E7-4) turns it off; its tree then holds no `tauri-plugin-updater`, and the GUI offers
+//! no update setting (`startup`'s `updater` is false, `apps/gui/main.js` hides the switch).
+#![forbid(unsafe_code)]
+#![allow(clippy::unwrap_used)]
+
+use std::path::Path;
+
+/// The packages in `lpk-gui`'s normal dependency tree on this host, with `features`. Windows
+/// alone: Tauri is a Windows-only dependency, and another target's crates need not be in the
+/// local cache (`--offline`).
+#[cfg(windows)]
+fn tree(features: &[&str]) -> String {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["tree", "--manifest-path"])
+        .arg(&manifest)
+        .args([
+            "-p",
+            "lpk-gui",
+            "-e",
+            "normal",
+            "--locked",
+            "--offline",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .args(features)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cargo tree: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[cfg(windows)]
+fn has_updater(tree: &str) -> bool {
+    tree.lines().any(|l| l.starts_with("tauri-plugin-updater "))
+}
+
+#[cfg(windows)]
+#[test]
+fn the_store_build_has_no_updater_in_its_tree() {
+    assert!(
+        has_updater(&tree(&[])),
+        "the default build lost its updater"
+    );
+    let store = tree(&["--no-default-features"]);
+    assert!(store.lines().any(|l| l.starts_with("tauri ")), "{store}");
+    assert!(
+        !has_updater(&store),
+        "tauri-plugin-updater in the Store build's tree"
+    );
+}
+
+#[test]
+fn the_page_hides_the_update_setting_without_the_updater() {
+    // The host tells the page whether it has the updater, from the feature alone.
+    let host = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("host.rs"),
+    )
+    .unwrap();
+    assert!(host.contains("updater: cfg!(feature = \"updater\")"));
+    let page = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/gui/main.js"),
+    )
+    .unwrap();
+    assert!(
+        page.contains("startup.updater"),
+        "main.js reads no updater flag"
+    );
+    assert!(page.contains("box.closest(\"label\").hidden = !updater"));
+}
+
+/// R326: the button promises a restart only when the installer will restart LitePack (the host's
+/// `restart`, `lpk_gui::update::restart_after_install`); otherwise it reads "Install and close".
+#[test]
+fn the_install_button_promises_a_restart_only_when_there_is_one() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let host = std::fs::read_to_string(dir.join("src").join("host.rs")).unwrap();
+    assert!(host.contains("let restart = lpk_gui::update::restart_after_install(&args);"));
+    let page = std::fs::read_to_string(dir.join("../../apps/gui/main.js")).unwrap();
+    assert!(page.contains(
+        "const label = n.restart ? t(\"update.install\") : t(\"update.install.close\");"
+    ));
+    assert!(page.contains("restart: notice.restart"));
+    let table = lpk_gui::strings::table();
+    assert_eq!(table["update.install"], "Install and restart");
+    assert_eq!(table["update.install.close"], "Install and close");
+    assert!(!lpk_gui::update::restart_after_install(&[
+        "lpk-gui.exe",
+        "--extract-here",
+        "C:\\x.lpk"
+    ]));
+}

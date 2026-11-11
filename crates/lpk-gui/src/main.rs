@@ -7,7 +7,7 @@
 
 #[cfg(windows)]
 mod host;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "updater"))]
 mod updates;
 
 #[cfg(windows)]
