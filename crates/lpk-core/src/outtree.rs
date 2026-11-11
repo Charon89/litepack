@@ -355,6 +355,13 @@ impl Tree {
     }
 
     fn finish_dir(&self, d: &DirMeta) -> Result<(), CoreError> {
+        #[cfg(test)]
+        if seam::finish_dir_refused() {
+            return Err(io(
+                &d.path,
+                std::io::Error::other("the time and attributes refused (test seam)"),
+            ));
+        }
         let time = crate::extract::mtime(d.mtime_ns);
         let hidden = d.flags.contains(EntryFlags::HIDDEN);
         let system = d.flags.contains(EntryFlags::SYSTEM);
@@ -628,8 +635,8 @@ mod win {
 
 /// Test hooks (`cfg(test)` only, so absent from every other build, as D-99 (8)'s hooks): a
 /// per-thread function called just before a directory is opened and just before a file is
-/// created (after its parent was verified), and a per-thread override of the symlink
-/// privilege probe.
+/// created (after its parent was verified), a per-thread override of the symlink
+/// privilege probe, and a per-thread refusal of the directories' times and attributes.
 #[cfg(test)]
 mod tests;
 
@@ -645,6 +652,17 @@ pub(crate) mod seam {
         static BEFORE_OPEN_DIR: RefCell<Option<Hook>> = RefCell::new(None);
         static PRIVILEGE: Cell<Option<bool>> = const { Cell::new(None) };
         static MAX_HELD: Cell<Option<usize>> = const { Cell::new(None) };
+        static REFUSE_FINISH_DIR: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make every directory time and attribute set on this thread fail, as a volume or a
+    /// filter refusing it would.
+    pub(crate) fn refuse_finish_dir(on: bool) {
+        REFUSE_FINISH_DIR.with(|c| c.set(on));
+    }
+
+    pub(super) fn finish_dir_refused() -> bool {
+        REFUSE_FINISH_DIR.with(Cell::get)
     }
 
     /// Hold at most `n` directories on this thread's trees (`None`: [`super::MAX_HELD`]).
@@ -663,7 +681,8 @@ pub(crate) mod seam {
     }
 
     /// Call `f` with a directory's full path just before it is opened relative to its parent
-    /// (Windows only: elsewhere directories are made by path).
+    /// (Windows), and before the directory pass opens a directory for its time and attributes
+    /// (every system).
     pub(crate) fn on_before_open_dir(f: Option<Hook>) {
         BEFORE_OPEN_DIR.with(|h| *h.borrow_mut() = f);
     }

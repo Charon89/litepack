@@ -1008,6 +1008,26 @@ fn motw_warning(zone: Option<lpk_core::motw::Zone>, json: bool, err: &mut dyn Wr
     }
 }
 
+/// Directories the extraction created whose time or attributes could not be set (E2-19):
+/// one line, `warning: N directories kept the times or attributes they had when created`,
+/// or with --json `{"warning":{"kind":"DirsUnset","count":N}}`; nothing when there are none.
+fn dirs_unset_warning(s: &lpk_core::ExtractSummary, json: bool, err: &mut dyn Write) {
+    let n = s.dirs_unset;
+    if n == 0 {
+        return;
+    }
+    if json {
+        let line = serde_json::json!({ "warning": { "kind": "DirsUnset", "count": n } });
+        let _ = writeln!(err, "{line}");
+    } else {
+        let noun = if n == 1 { "directory" } else { "directories" };
+        let _ = writeln!(
+            err,
+            "warning: {n} {noun} kept the times or attributes they had when created"
+        );
+    }
+}
+
 /// The archive's zone could not be read and was taken as the Internet zone (fail safe): one
 /// line, `warning: Mark of the Web: ...`, or with --json
 /// `{"warning":{"kind":"MotwZoneUnreadable"}}`.
@@ -1757,6 +1777,7 @@ fn extract(
     }
     unprivileged_warnings(&report.unprivileged_symlinks, json, err);
     refused_target_warnings(&report.refused_symlink_targets, json, err);
+    dirs_unset_warning(&s, json, err);
     if json {
         if s.skipped > 0 || s.renamed > 0 || s.symlinks_skipped > 0 {
             let line = serde_json::json!({
@@ -2330,6 +2351,37 @@ fn dispatch(
                 export(&x, c, json, console, out, err)
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod dirs_unset_tests {
+    fn line(n: u64, json: bool) -> String {
+        let s = lpk_core::ExtractSummary {
+            dirs_unset: n,
+            ..lpk_core::ExtractSummary::default()
+        };
+        let mut err = Vec::new();
+        super::dirs_unset_warning(&s, json, &mut err);
+        String::from_utf8_lossy(&err).into_owned()
+    }
+
+    #[test]
+    fn the_dirs_unset_warning_counts_directories() {
+        assert_eq!(line(0, false), "");
+        assert_eq!(line(0, true), "");
+        assert_eq!(
+            line(1, false),
+            "warning: 1 directory kept the times or attributes they had when created\n"
+        );
+        assert_eq!(
+            line(3, false),
+            "warning: 3 directories kept the times or attributes they had when created\n"
+        );
+        assert_eq!(
+            line(2, true).trim_end(),
+            r#"{"warning":{"count":2,"kind":"DirsUnset"}}"#
+        );
     }
 }
 

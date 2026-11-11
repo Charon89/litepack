@@ -91,6 +91,7 @@ impl Drop for Reset {
         seam::on_before_open_dir(None);
         seam::force_symlink_privilege(None);
         seam::force_max_held(None);
+        seam::refuse_finish_dir(false);
         #[cfg(windows)]
         lpk_fs_sys::set_share_delete_for_tests(false);
     }
@@ -653,4 +654,109 @@ fn a_volume_without_named_streams_extracts_unmarked_with_one_flag() {
     for f in ["a.txt", "d/b.bin", "d/e/c.txt", "z.txt"] {
         assert_eq!(crate::motw::read_zone(&out.join(f)), None, "{f}");
     }
+}
+
+/// An archive with one directory entry, `d` (hidden, its time two seconds after the epoch),
+/// and the files `d/f.txt` and `top.txt`.
+fn one_dir_archive() -> Vec<u8> {
+    pack(|w| {
+        w.add_directory("d", EntryFlags::HIDDEN, 2_000_000_000)
+            .unwrap();
+        w.add_file("d/f.txt", EntryFlags::EMPTY, 0, &mut &b"inside"[..])
+            .unwrap();
+        w.add_file("top.txt", EntryFlags::EMPTY, 0, &mut &b"top"[..])
+            .unwrap();
+    })
+}
+
+/// A directory's time and, on Windows, its attributes, to compare before and after.
+fn dir_state(p: &Path) -> (std::time::SystemTime, u32) {
+    let m = std::fs::metadata(p).unwrap();
+    #[cfg(windows)]
+    let attrs = {
+        use std::os::windows::fs::MetadataExt;
+        m.file_attributes()
+    };
+    #[cfg(not(windows))]
+    let attrs = 0;
+    (m.modified().unwrap(), attrs)
+}
+
+/// A directory this extraction created, swapped for a link (a junction on Windows, a symlink
+/// elsewhere) to an outside directory just before the directory pass opens it: the pass never
+/// opens through the link, so the outside directory keeps its time and attributes, the
+/// extraction succeeds, and the directory is counted in `dirs_unset`. On Windows the test-only
+/// `FILE_SHARE_DELETE` switch lets the held directory be renamed.
+#[cfg(any(windows, unix))]
+#[test]
+fn a_link_swapped_in_during_the_directory_pass_is_never_opened() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let _reset = Reset;
+    let work = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("canary.txt"), b"canary").unwrap();
+    let before = dir_state(outside.path());
+    let out = work.path().join("out");
+    #[cfg(windows)]
+    lpk_fs_sys::set_share_delete_for_tests(true);
+    let (o, t) = (out.clone(), outside.path().to_path_buf());
+    let swapped = Rc::new(Cell::new(false));
+    let s2 = Rc::clone(&swapped);
+    // The files are written before the pass, so `d/f.txt` existing marks the pass's open.
+    seam::on_before_open_dir(Some(Box::new(move |p: &Path| {
+        if p.ends_with("d") && !s2.get() && o.join("d").join("f.txt").exists() {
+            s2.set(true);
+            std::fs::rename(o.join("d"), o.join("moved")).unwrap();
+            #[cfg(windows)]
+            assert!(crate::ingest::tests::junction(&t, &o.join("d")));
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&t, o.join("d")).unwrap();
+        }
+    })));
+    let s = extract(&one_dir_archive(), &out, &Policy::default()).unwrap();
+    assert!(swapped.get(), "the hook did not swap the directory");
+    assert_eq!(s.dirs_unset, 1);
+    assert_eq!(s.files, 2);
+    assert_eq!(dir_state(outside.path()), before);
+    assert_eq!(listing(outside.path()), ["canary.txt"]);
+    assert_eq!(
+        std::fs::read(outside.path().join("canary.txt")).unwrap(),
+        b"canary"
+    );
+    assert_eq!(std::fs::read(out.join("moved/f.txt")).unwrap(), b"inside");
+    assert_eq!(std::fs::read(out.join("top.txt")).unwrap(), b"top");
+    // The planted link, removed as a link (never followed).
+    #[cfg(windows)]
+    std::fs::remove_dir(out.join("d")).unwrap();
+    #[cfg(unix)]
+    std::fs::remove_file(out.join("d")).unwrap();
+}
+
+/// A directory whose time and attributes are refused (the test seam, as a volume or a filter
+/// would): the extraction succeeds, every file arrives with its content, and the directory is
+/// counted once in `dirs_unset`.
+#[test]
+fn a_refused_directory_time_is_a_count_not_an_error() {
+    let _reset = Reset;
+    let work = tempfile::tempdir().unwrap();
+    let out = work.path().join("out");
+    seam::refuse_finish_dir(true);
+    let s = extract(&one_dir_archive(), &out, &Policy::default()).unwrap();
+    assert_eq!(s.dirs_unset, 1);
+    assert_eq!(s.files, 2);
+    assert_eq!(std::fs::read(out.join("d/f.txt")).unwrap(), b"inside");
+    assert_eq!(std::fs::read(out.join("top.txt")).unwrap(), b"top");
+    // Without the seam the same archive sets everything.
+    seam::refuse_finish_dir(false);
+    let out = work.path().join("again");
+    let s = extract(&one_dir_archive(), &out, &Policy::default()).unwrap();
+    assert_eq!(s.dirs_unset, 0);
+    assert_eq!(
+        std::fs::metadata(out.join("d"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(2)
+    );
 }
