@@ -199,7 +199,17 @@ NSIS_PLUGINS = ("NSIS's plugin folder of the x86 installer or uninstaller, which
 # write on their own schedule, in folders of their own.
 CBS_WEBVIEW = r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\LocalState\EBWebView"
 FIREFOX_BACKGROUND_TASKS = r"%APPDATA%\Mozilla\Firefox\Background Tasks Profiles"
+# R407 (CI run 43750018894's portable job, windows-2025; release.yml run 43750018868's verify-arm64): Windows' device
+# census recording its scheduled run for the user, and the Widgets package's settings hive log beside its Helium ones.
+CENSUS = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Census"
+WEBEXPERIENCE_SETTINGS = r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy\Settings"
 ALLOW = [
+    # R407.
+    {"kind": "key", "path": CENSUS,
+     "reason": "Windows' device census (its scheduled Census task) recording its last run for the user; LitePack "
+               "writes nothing under it (R407, CI run 43750018894)"},
+    {"kind": "file-changed-pattern", "path": WEBEXPERIENCE_SETTINGS, "name": r"settings\.dat\.LOG[12]",
+     "reason": "the Widgets package's own settings hive log, which Windows rewrites on its own (R407)"},
     # R406.
     {"kind": "file", "path": CBS_WEBVIEW,
      "reason": "the WebView2 data of Windows' own Start and Search client package (Client.CBS), which its "
@@ -1916,6 +1926,24 @@ class Tests(unittest.TestCase):
         for kind, path in (("key", SECURITY_MAINTENANCE + "X"), ("value", CURRENT_VERSION + r"\Security"),
                            ("key", CURRENT_VERSION + r"\Action Center")):
             self.assertIsNone(allowed(kind, path, "x", "+", snap()), path)
+
+    def test_r407_the_device_census_and_the_widgets_settings_log_and_their_siblings(self):
+        for sign in "+~-":
+            self.assertIn("R407", allowed("key", CENSUS, None, sign, snap()) or "")
+            for name in ("ReturnCode", "StartTime", "StartTimeBin"):
+                self.assertIn("R407", allowed("value", CENSUS, name, sign, snap()) or "", (sign, name))
+        for leaf in ("settings.dat.LOG2", "settings.dat.LOG1", "Settings.dat.log2"):
+            self.assertIn("R407", allowed("file", WEBEXPERIENCE_SETTINGS + "\\" + leaf, None, "~", snap()) or "", leaf)
+        current = CENSUS.rsplit("\\", 1)[0]
+        for kind, path, name in (("key", current + r"\CensusX", None), ("value", current + r"\Census2", "StartTime"),
+                                 ("value", current, "Census"), ("key", r"HKCU\Software\Census", None)):
+            self.assertIsNone(allowed(kind, path, name, "+", snap()), path)
+        ws = WEBEXPERIENCE_SETTINGS
+        misses = [("+", ws + r"\settings.dat.LOG2"), ("-", ws + r"\settings.dat.LOG1"),
+                  ("~", ws + r"\settings.dat"), ("~", ws + r"\settings.dat.LOG3"),
+                  ("~", ws + r"\Sub\settings.dat.LOG1"), ("~", ws.rsplit("\\", 1)[0] + r"\settings.dat.LOG1")]
+        for sign, path in misses:
+            self.assertIsNone(allowed("file", path, None, sign, snap()), (sign, path))
 
     def test_r406_windows_shell_webview_data_and_firefox_background_tasks_and_their_siblings(self):
         for sign in "+~-":

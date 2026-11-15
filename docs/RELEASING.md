@@ -438,7 +438,8 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   from each runner's own records (R365, R372, R380, R388; R401, R404 and R406 for the verify jobs' first runs),
   never guessed. The windows-11-arm image, a client Windows with Store apps and Firefox, writes more on its own than
   windows-2025 does; each run so far showed a few records of its own (R406: the Start and Search client's WebView2
-  data and Firefox's background tasks). The signing checks and the upgrade from a previous public release are part 2's.
+  data and Firefox's background tasks; R407: the Widgets package's settings hive log). Windows' device census,
+  which records its scheduled run under `CurrentVersion\Census`, is allowed on both runners (R407). The signing checks and the upgrade from a previous public release are part 2's.
 
 **The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
 names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,
