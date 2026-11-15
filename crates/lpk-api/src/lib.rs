@@ -58,6 +58,12 @@ pub fn check_extraction_path(path: &str) -> Result<(), Error> {
 /// The broker's options for a foreign archive (E4's limits and the worker).
 pub type ForeignOptions = lpk_core::foreign::Options;
 
+/// The worker's AppContainer profile: its removal (the GUI's About box, as
+/// `lpk-worker --remove-profile`; `docs/notes/e7-design.md` section 5) and what it did.
+pub use lpk_core::foreign::ProfileRemoval;
+#[cfg(any(windows, target_os = "linux"))]
+pub use lpk_core::foreign::{remove_profile_named, remove_worker_profile};
+
 #[cfg(test)]
 mod tests {
     /// E5-1: a session can be shared across threads (the GUI's commands run on a pool).

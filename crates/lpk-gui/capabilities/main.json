@@ -40,6 +40,9 @@
     "allow-rollback-run",
     "allow-append-plan",
     "allow-append-run",
+    "allow-about",
+    "allow-about-open",
+    "allow-remove-profile",
     "allow-update-install",
     "allow-update-skip",
     "allow-open-release-page"

@@ -95,6 +95,9 @@ Stated by the decisions that built the sandbox; none is closed by this note.
    Other platforms have no pin (and no zone).
 8. The tests run on Windows 11 and `windows-2025` CI; the run on Windows 10 22H2 is by hand on E5-10's machine and
    has not happened yet (D-97, D-105).
+9. The GUI's About box removes the `LitePack.Worker` profile only while no operation of its own window runs; removing
+   it while another LitePack process (a terminal `lpk x`, a second window) uses it can make that process's next worker
+   launch fail once, after which the profile is made again.
 
 ## 4. Crash containment (E4-5)
 

@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod about;
 pub mod activation;
 pub mod app;
 pub mod batch;

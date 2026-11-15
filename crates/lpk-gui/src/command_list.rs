@@ -39,6 +39,10 @@ pub const COMMANDS: &[&str] = &[
     "rollback_run",
     "append_plan",
     "append_run",
+    // The About box: its facts, a link by name (`lpk_gui::about::Link`), the profile's removal.
+    "about",
+    "about_open",
+    "remove_profile",
     "update_install",
     "update_skip",
     "open_release_page",
