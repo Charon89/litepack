@@ -101,9 +101,24 @@ pub fn recents_file() -> Option<PathBuf> {
     state_dir().map(|d| d.join("recents.json"))
 }
 
+/// The updater's state (E7-7): the last check's day and the skipped version, Rust's alone.
+pub fn update_state_file() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("update.json"))
+}
+
 /// WebView2's user data folder.
 pub fn webview_dir() -> Option<PathBuf> {
     state_dir().map(|d| d.join("WebView2"))
+}
+
+/// The alternate WebView2 folder's name beside [`webview_dir`] (R362).
+pub const WEBVIEW_ALTERNATE: &str = "WebView2-2";
+
+/// WebView2's user data folders (R362): the primary ([`webview_dir`], always tried first) and the
+/// alternate beside it, used while the primary is still held by the browser process of a LitePack
+/// that ended abruptly. Both lie in the state folder, which the uninstaller removes whole.
+pub fn webview_dirs() -> Option<[PathBuf; 2]> {
+    state_dir().map(|d| [d.join("WebView2"), d.join(WEBVIEW_ALTERNATE)])
 }
 
 /// The folder opened entries are extracted into, each into a fresh folder of its own
@@ -178,6 +193,20 @@ mod tests {
         // Nothing replaced the file, and nothing else was made.
         assert!(exe.path().join(PORTABLE_DATA).is_file());
         assert_eq!(std::fs::read_dir(exe.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn the_webview_folders_lie_side_by_side_in_the_state_folder() {
+        let Some([primary, alternate]) = webview_dirs() else {
+            return;
+        };
+        assert_eq!(Some(primary.clone()), webview_dir());
+        assert_eq!(primary.parent(), alternate.parent());
+        assert_eq!(primary.parent(), state_dir().as_deref());
+        assert_eq!(
+            alternate.file_name().and_then(|n| n.to_str()),
+            Some(WEBVIEW_ALTERNATE)
+        );
     }
 
     #[test]
