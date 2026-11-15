@@ -390,6 +390,38 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   extracts through the sandboxed worker, compared again. From the portable zip, the GUI opens the `.lpk` and the
   `.zip` under `LPK_GUI_SMOKE_REPORT`, each report with no problems and rows rendered (as `ci.yml`'s `portable` job),
   then `lpk-worker.exe --remove-profile` removes the worker's profile.
+- `verify-x64` (windows-2025) and `verify-arm64` (windows-11-arm, part 1e): the release's own installer and portable
+  zip of the runner's architecture, as a user gets them (`docs/notes/e7-design.md` section 1's `verify`, sections 3
+  and 5). Each needs `preflight` and `assemble`, downloads `release-assets`, and checks `SHA256SUMS` against
+  `assemble`'s output, then `sha256sum -c`. Python is setup-python's 3.13.7; on windows-11-arm it is the x64 build
+  (`architecture: x64`, run under Windows 11's x64 emulation, which shares the native registry view and System32),
+  because setup-python cannot install 3.13.7 for ARM64 there. The job prints `platform.machine()` and `sys.version`.
+  The steps mirror `ci.yml`'s `installer` and `portable` jobs:
+  - `e7-residue.py snapshot`; `LitePack_<v>_<arch>-setup.exe /S` (exit 0 within 300 s); the installed layout (the
+    six PEs, `uninstall.exe`, the notices and both licences, each compared with the repository's with `cmp`);
+    `e7-installer-check.py installed <install> <v>` (the Uninstall key, the user `Path`, route C, the `.lpk`
+    association and `GuiPath`); every installed PE at the runner's machine (`e7-pe-sections.py --machine`, 0x8664 or
+    0xAA64).
+  - `lpk` found through the user `Path`: `HKCU\Environment`'s `Path` read (read-only, as `e7-installer-check.py`
+    reads it), its entries expanded; the first that holds `lpk.exe` must be the install's `bin\`, and its
+    `lpk --version` names the version. With it a small folder round-trips through `a` and `x`, `lpk export` writes a
+    `.zip`, and `lpk l` and `lpk x` read it through the installed `bin\lpk-worker.exe` (which makes the worker's
+    profile).
+  - The installed GUI opens the `.lpk` and the `.zip` under `LPK_GUI_SMOKE_REPORT` (each report names the archive,
+    has no problems and rendered rows); a snapshot and a diff that must show the worker's profile
+    (`--require-worker-profile --allow-settings --run-folder <install>`).
+  - `uninstall.exe /S`, waited on with `e7-wait-uninstaller.sh`; no install folder left; a snapshot and the diff
+    against the first with `ci.yml`'s uninstall flags (`--allow-settings --allow-uninstaller-copy --run-folder
+    <install>`; the profile not allowed).
+  - The portable snapshot: a fresh snapshot (and `cmdkey /list`), the portable zip unzipped with `zipfile` into
+    `RUNNER_TEMP\portable-run`, outside the profile; its `lpk.exe` makes a `.lpk` and a `.zip`, its GUI opens both
+    (checked as above); a diff that must show the worker's profile (`--require-worker-profile`), then
+    `lpk-worker.exe --remove-profile` and a diff that allows nothing; `cmdkey /list` must name no LitePack credential
+    after each.
+  - Every diff records a verdict line and the job goes on, so one run prints all of them; the last step fails on any.
+  Their results gate nothing yet: no tag and no release exist. The allowances `e7-residue.py` makes are those of the
+  x64 runner (R365, R372, R380, R388); any record the ARM64 runner writes beyond them is printed by the first run and
+  ruled on, not guessed. The signing checks and the upgrade from a previous public release are part 2's.
 
 **The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
 names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,
@@ -427,9 +459,9 @@ any PC that is not ARM64. The x64 installer refuses on ARM64, as before, and on 
 **Unsigned, and deferred to part 2.** Every PE and both installers are unsigned. Part 2 adds signing (with
 `signtool verify`), its deployment target, attestation, the draft release and the tag trigger, the updater's
 `latest.json` signature, and the proof that the bundler downloads nothing (here it may fetch NSIS itself). The later
-steps of part 1 add the rest: part 1d the SBOMs (E8-6's half; done, above), and part 1e the install checks on both architectures (a silent install of each
-architecture's installer, its layout and notices, the GUI and `bin\lpk.exe` on a `.lpk` and a `.zip`, a silent
-uninstall and the residue diff). Part 2 then signs the PEs and both installers, and `assemble` checks the
+steps of part 1 add the rest: part 1d the SBOMs (E8-6's half; done, above), and part 1e the install checks on both architectures (`verify-x64` and
+`verify-arm64`, above: a silent install of each architecture's installer, its layout and notices, the GUI and
+`bin\lpk.exe` on a `.lpk` and a `.zip`, a silent uninstall and the residue diff, and the portable snapshot). Part 2 then signs the PEs and both installers, and `assemble` checks the
 artefacts against the signed files instead (`docs/notes/e7-design.md` section 1). Signing also changes the bytes of
 the NSIS parts inside each installer: when it can sign, tauri-bundler 2.10.4 signs its own copies of the
 `Plugins/x86-unicode` plugins before makensis packs them, and the stub the uninstaller is rebuilt from is the signed

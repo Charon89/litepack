@@ -432,7 +432,7 @@ jobs:
           echo "refused on x64 with nothing installed"
 
   # The ARM64 installer on ARM64: a silent install, every installed PE ARM64 and byte-equal to the build's, bin\lpk.exe
-  # runs and round-trips a folder, then a silent uninstall leaves no install folder. (The residue diff: part 1d.)
+  # runs and round-trips a folder, then a silent uninstall leaves no install folder. (The residue diff: verify-arm64.)
   install-arm64:
     name: ARM64 install and uninstall (windows-11-arm)
     needs: [preflight, build-arm64, package]
@@ -824,3 +824,420 @@ jobs:
       - name: The worker's profile removed from the portable copy
         if: ${{ !cancelled() }}
         run: '"$T/portable/LitePack/lpk-worker.exe" --remove-profile'
+
+  # Part 1e: the release's own installer and portable zip of each architecture, as a user gets them
+  # (docs/notes/e7-design.md section 1's `verify`, sections 3 and 5). SHA256SUMS checked; a snapshot, a silent install,
+  # the layout, notices and registration (scripts/e7-installer-check.py, as ci.yml's installer job), every installed PE
+  # at the runner's machine, `lpk` found through the user Path the installer wrote, a round trip and a .zip through the
+  # installed worker, the installed GUI on a .lpk and a .zip, a silent uninstall and the residue diff against the first
+  # snapshot (ci.yml's installer job's uninstall diff); then the portable snapshot (ci.yml's portable job): a fresh
+  # snapshot, the portable zip unzipped outside the profile, its GUI on a .lpk and a .zip, --remove-profile, the diffs.
+  # The diffs record verdicts and go on; the last step fails on any. These results gate nothing yet (no tag, no release).
+  # The signing checks and the upgrade from a previous public release are part 2's.
+  verify-x64:
+    name: verify x64 (windows-2025)
+    needs: [preflight, assemble]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+      ARCH: x64
+      MACHINE: "0x8664"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: The Python this job runs
+        run: python -I -c "import platform, sys; print('platform.machine():', platform.machine()); print('sys.version:', sys.version)"
+      - name: Work folders
+        run: |
+          t="$(cygpath -m "$RUNNER_TEMP")"
+          {
+            echo "T=$t"; echo "SNAP=$t/residue"; echo "W=$t/work"; echo "PW=$t/portable-work"
+            echo "RUNF=$t/portable-run/LitePack"
+            echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack"
+          } >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+      - name: Check SHA256SUMS against the assemble job's output, then every asset
+        env:
+          SUMS: ${{ needs.assemble.outputs.sums }}
+        run: |
+          test -n "$SUMS"
+          test "$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" = "$SUMS" || { echo "SHA256SUMS is not the assemble job's"; exit 1; }
+          (cd "$T/assets" && sha256sum -c SHA256SUMS)
+          test "$(wc -l < "$T/assets/SHA256SUMS")" = 7
+      - name: The residue and PE scripts' own tests
+        run: |
+          python -I scripts/e7-residue.py --self-test
+          python -I scripts/e7-pe-sections.py --self-test
+      # ci.yml's installer job: "Snapshot before".
+      - name: Snapshot before the install
+        run: |
+          mkdir -p "$SNAP" "$W/in/sub"
+          test ! -e "$INST" || { echo "already present: $INST"; exit 1; }
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+      # ci.yml's installer job: "Install N silently and check the layout, the notices, the Uninstall key, Path and
+      # route C", with the release's version; then each installed PE's machine (as the smoke jobs check the zips').
+      - name: Install silently; the layout, the notices, the registration, and every installed PE at this machine
+        run: |
+          set -euo pipefail
+          setup="$T/assets/LitePack_${VERSION}_${ARCH}-setup.exe"
+          test -f "$setup" || { echo "no $setup"; exit 1; }
+          rc=0; timeout 300 "$setup" /S || rc=$?
+          echo "$ARCH installer: exit code $rc"
+          test "$rc" -eq 0
+          ls -laR "$INST"
+          pes=(lpk-gui.exe bin/lpk.exe bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe "shell/$VERSION/lpk_shell.dll")
+          for f in uninstall.exe THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT "${pes[@]}"; do
+            test -f "$INST/$f" || { echo "missing: $f"; exit 1; }
+          done
+          for f in THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT; do cmp "$f" "$INST/$f"; done
+          python -I scripts/e7-installer-check.py installed "$INST" "$VERSION"
+          (cd "$INST" && python -I "$GITHUB_WORKSPACE/scripts/e7-pe-sections.py" --machine "$MACHINE" "${pes[@]}")
+      # The user Path as e7-installer-check.py reads it (HKCU\Environment, read-only), its %VARS% expanded: the first
+      # entry that holds lpk.exe is the one this job runs, and it must be the install's bin\.
+      - name: lpk found through the user Path the installer wrote
+        run: |
+          set -euo pipefail
+          entries="$(python -I -c "
+          import os, winreg
+          with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment') as k:
+              value, kind = winreg.QueryValueEx(k, 'Path')
+          print('user Path (type %d): %r' % (kind, value), file=__import__('sys').stderr)
+          for e in value.split(';'):
+              if e.strip():
+                  print(os.path.expandvars(e.strip()))
+          " | tr -d '\r')"
+          found=""
+          while IFS= read -r e; do
+            d="$(cygpath -m "$e")"
+            if [ -f "$d/lpk.exe" ]; then found="$d"; break; fi
+          done <<<"$entries"
+          test -n "$found" || { echo "no entry of the user Path holds lpk.exe"; exit 1; }
+          echo "lpk.exe found through the user Path in $found"
+          python -I -c "import os, sys; sys.exit(os.path.normcase(os.path.abspath(sys.argv[1])) != os.path.normcase(os.path.abspath(sys.argv[2])))" "$found" "$INST/bin" \
+            || { echo "$found is not $INST/bin"; exit 1; }
+          echo "LPK=$found/lpk.exe" >> "$GITHUB_ENV"
+          line="$("$found/lpk.exe" --version | tr -d '\r')"
+          echo "$line"
+          case "$line" in "lpk $VERSION+"*) ;; *) echo "lpk --version does not name $VERSION"; exit 1 ;; esac
+      # As the smoke jobs' CLI step, with the installed lpk: the .zip goes through the installed bin\lpk-worker.exe,
+      # which makes the worker's profile.
+      - name: A round trip, and a .zip extracted through the installed worker
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do echo "file $i" > "$W/in/sub/f$i.txt"; done
+          printf 'top\n' > "$W/in/top.txt"
+          same() {
+            (cd "$W/in" && find . -type f) | while read -r f; do cmp "$W/in/$f" "$1/$f" || exit 1; done
+            test "$(cd "$W/in" && find . -type f | wc -l)" = "$(cd "$1" && find . -type f | wc -l)"
+            echo "$1: the files equal the originals"
+          }
+          "$LPK" a "$W/small.lpk" "$W/in"
+          "$LPK" x "$W/small.lpk" "$W/out-lpk"
+          same "$W/out-lpk"
+          "$LPK" export "$W/small.lpk" "$W/small.zip"
+          "$LPK" l "$W/small.zip"
+          "$LPK" x "$W/small.zip" "$W/out-zip"
+          same "$W/out-zip"
+          ls -la "$W"
+      # ci.yml's installer job: "The installed GUI opens a .lpk and a .zip", and its residue check (the worker profile
+      # required, the settings allowed).
+      - name: The installed GUI opens the .lpk, then the .zip
+        run: |
+          set -euo pipefail
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$W/report-$a.json" timeout 180 "$INST/lpk-gui.exe" "$W/$a"
+            report="$(cat "$W/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile --allow-settings --run-folder "$INST" > "$SNAP/2.txt" || true
+          cat "$SNAP/2.txt"
+          grep -q "PROFILE MISSING" "$SNAP/2.txt" && echo "no worker profile after the installed GUI" >> "$SNAP/verdicts" || true
+      # ci.yml's installer job: "Uninstall silently, then the residue against the first snapshot (profile not
+      # allowed)", the same flags.
+      - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
+        run: |
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST"
+          if [ -e "$INST" ]; then ls -laR "$INST"; echo "after the uninstall: $INST left" >> "$SNAP/verdicts"; fi
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+      # ci.yml's portable job, from "Snapshot before" to "Residue after --remove-profile", on the release's zip.
+      - name: The portable snapshot - before
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/p1-before.json"
+          cmdkey /list > "$SNAP/cmdkey-p1-before.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p1-before.txt"; then
+            echo "p1-before: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+      - name: Unzip the portable zip into a fresh folder outside the profile
+        run: |
+          set -euo pipefail
+          test ! -e "$T/portable-run" || { echo "already present: $T/portable-run"; exit 1; }
+          python -I -m zipfile -e "$T/assets/litepack-$VERSION-windows-$ARCH-portable.zip" "$T/portable-run"
+          ls -la "$RUNF"
+      - name: A small .lpk and a small .zip with the portable lpk.exe
+        run: |
+          set -euo pipefail
+          mkdir -p "$PW/in/sub"
+          for i in 1 2 3; do echo "file $i" > "$PW/in/sub/f$i.txt"; done
+          "$RUNF/lpk.exe" a "$PW/small.lpk" "$PW/in"
+          "$RUNF/lpk.exe" export "$PW/small.lpk" "$PW/small.zip"
+          ls -la "$PW"
+      - name: The portable GUI opens the .lpk, then the .zip (a foreign archive)
+        run: |
+          set -euo pipefail
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$PW/report-$a.json" timeout 180 "$RUNF/lpk-gui.exe" "$PW/$a"
+            report="$(cat "$PW/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          ls -la "$RUNF" "$RUNF/data"
+      - name: The portable residue after the GUI (the worker profile required)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/p2-after-gui.json"
+          cmdkey /list > "$SNAP/cmdkey-p2-after-gui.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p2-after-gui.txt"; then
+            echo "p2-after-gui: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/p1-before.json" "$SNAP/p2-after-gui.json" \
+            --require-worker-profile || echo "portable, after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
+      - name: The portable residue after --remove-profile (nothing allowed)
+        run: |
+          "$RUNF/lpk-worker.exe" --remove-profile
+          python -I scripts/e7-residue.py snapshot "$SNAP/p3-after-remove.json"
+          cmdkey /list > "$SNAP/cmdkey-p3-after-remove.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p3-after-remove.txt"; then
+            echo "p3-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/p1-before.json" "$SNAP/p3-after-remove.json" \
+            || echo "portable, after --remove-profile: residue" >> "$SNAP/verdicts"
+      - name: Residue verdict
+        run: |
+          if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
+          echo "verify $ARCH: installed, used and uninstalled, and the portable copy run, with nothing left but the allowed entries"
+
+  verify-arm64:
+    name: verify arm64 (windows-11-arm)
+    needs: [preflight, assemble]
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+      ARCH: arm64
+      MACHINE: "0xAA64"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # actions/setup-python cannot install 3.13.7 for ARM64 here (install-arm64 and smoke-arm64 avoid Python for
+      # that reason); the x64 build runs under Windows 11's x64 emulation, which shares the native registry view and
+      # System32 (only x86 is redirected), so the residue tool reads what an ARM64 program would.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+          architecture: x64
+      - name: The Python this job runs
+        run: python -I -c "import platform, sys; print('platform.machine():', platform.machine()); print('sys.version:', sys.version)"
+      - name: Work folders
+        run: |
+          t="$(cygpath -m "$RUNNER_TEMP")"
+          {
+            echo "T=$t"; echo "SNAP=$t/residue"; echo "W=$t/work"; echo "PW=$t/portable-work"
+            echo "RUNF=$t/portable-run/LitePack"
+            echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack"
+          } >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+      - name: Check SHA256SUMS against the assemble job's output, then every asset
+        env:
+          SUMS: ${{ needs.assemble.outputs.sums }}
+        run: |
+          test -n "$SUMS"
+          test "$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" = "$SUMS" || { echo "SHA256SUMS is not the assemble job's"; exit 1; }
+          (cd "$T/assets" && sha256sum -c SHA256SUMS)
+          test "$(wc -l < "$T/assets/SHA256SUMS")" = 7
+      - name: The residue and PE scripts' own tests
+        run: |
+          python -I scripts/e7-residue.py --self-test
+          python -I scripts/e7-pe-sections.py --self-test
+      # ci.yml's installer job: "Snapshot before".
+      - name: Snapshot before the install
+        run: |
+          mkdir -p "$SNAP" "$W/in/sub"
+          test ! -e "$INST" || { echo "already present: $INST"; exit 1; }
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+      # ci.yml's installer job: "Install N silently and check the layout, the notices, the Uninstall key, Path and
+      # route C", with the release's version; then each installed PE's machine (as the smoke jobs check the zips').
+      - name: Install silently; the layout, the notices, the registration, and every installed PE at this machine
+        run: |
+          set -euo pipefail
+          setup="$T/assets/LitePack_${VERSION}_${ARCH}-setup.exe"
+          test -f "$setup" || { echo "no $setup"; exit 1; }
+          rc=0; timeout 300 "$setup" /S || rc=$?
+          echo "$ARCH installer: exit code $rc"
+          test "$rc" -eq 0
+          ls -laR "$INST"
+          pes=(lpk-gui.exe bin/lpk.exe bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe "shell/$VERSION/lpk_shell.dll")
+          for f in uninstall.exe THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT "${pes[@]}"; do
+            test -f "$INST/$f" || { echo "missing: $f"; exit 1; }
+          done
+          for f in THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT; do cmp "$f" "$INST/$f"; done
+          python -I scripts/e7-installer-check.py installed "$INST" "$VERSION"
+          (cd "$INST" && python -I "$GITHUB_WORKSPACE/scripts/e7-pe-sections.py" --machine "$MACHINE" "${pes[@]}")
+      # The user Path as e7-installer-check.py reads it (HKCU\Environment, read-only), its %VARS% expanded: the first
+      # entry that holds lpk.exe is the one this job runs, and it must be the install's bin\.
+      - name: lpk found through the user Path the installer wrote
+        run: |
+          set -euo pipefail
+          entries="$(python -I -c "
+          import os, winreg
+          with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment') as k:
+              value, kind = winreg.QueryValueEx(k, 'Path')
+          print('user Path (type %d): %r' % (kind, value), file=__import__('sys').stderr)
+          for e in value.split(';'):
+              if e.strip():
+                  print(os.path.expandvars(e.strip()))
+          " | tr -d '\r')"
+          found=""
+          while IFS= read -r e; do
+            d="$(cygpath -m "$e")"
+            if [ -f "$d/lpk.exe" ]; then found="$d"; break; fi
+          done <<<"$entries"
+          test -n "$found" || { echo "no entry of the user Path holds lpk.exe"; exit 1; }
+          echo "lpk.exe found through the user Path in $found"
+          python -I -c "import os, sys; sys.exit(os.path.normcase(os.path.abspath(sys.argv[1])) != os.path.normcase(os.path.abspath(sys.argv[2])))" "$found" "$INST/bin" \
+            || { echo "$found is not $INST/bin"; exit 1; }
+          echo "LPK=$found/lpk.exe" >> "$GITHUB_ENV"
+          line="$("$found/lpk.exe" --version | tr -d '\r')"
+          echo "$line"
+          case "$line" in "lpk $VERSION+"*) ;; *) echo "lpk --version does not name $VERSION"; exit 1 ;; esac
+      # As the smoke jobs' CLI step, with the installed lpk: the .zip goes through the installed bin\lpk-worker.exe,
+      # which makes the worker's profile.
+      - name: A round trip, and a .zip extracted through the installed worker
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do echo "file $i" > "$W/in/sub/f$i.txt"; done
+          printf 'top\n' > "$W/in/top.txt"
+          same() {
+            (cd "$W/in" && find . -type f) | while read -r f; do cmp "$W/in/$f" "$1/$f" || exit 1; done
+            test "$(cd "$W/in" && find . -type f | wc -l)" = "$(cd "$1" && find . -type f | wc -l)"
+            echo "$1: the files equal the originals"
+          }
+          "$LPK" a "$W/small.lpk" "$W/in"
+          "$LPK" x "$W/small.lpk" "$W/out-lpk"
+          same "$W/out-lpk"
+          "$LPK" export "$W/small.lpk" "$W/small.zip"
+          "$LPK" l "$W/small.zip"
+          "$LPK" x "$W/small.zip" "$W/out-zip"
+          same "$W/out-zip"
+          ls -la "$W"
+      # ci.yml's installer job: "The installed GUI opens a .lpk and a .zip", and its residue check (the worker profile
+      # required, the settings allowed).
+      - name: The installed GUI opens the .lpk, then the .zip
+        run: |
+          set -euo pipefail
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$W/report-$a.json" timeout 180 "$INST/lpk-gui.exe" "$W/$a"
+            report="$(cat "$W/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile --allow-settings --run-folder "$INST" > "$SNAP/2.txt" || true
+          cat "$SNAP/2.txt"
+          grep -q "PROFILE MISSING" "$SNAP/2.txt" && echo "no worker profile after the installed GUI" >> "$SNAP/verdicts" || true
+      # ci.yml's installer job: "Uninstall silently, then the residue against the first snapshot (profile not
+      # allowed)", the same flags.
+      - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
+        run: |
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST"
+          if [ -e "$INST" ]; then ls -laR "$INST"; echo "after the uninstall: $INST left" >> "$SNAP/verdicts"; fi
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+      # ci.yml's portable job, from "Snapshot before" to "Residue after --remove-profile", on the release's zip.
+      - name: The portable snapshot - before
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/p1-before.json"
+          cmdkey /list > "$SNAP/cmdkey-p1-before.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p1-before.txt"; then
+            echo "p1-before: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+      - name: Unzip the portable zip into a fresh folder outside the profile
+        run: |
+          set -euo pipefail
+          test ! -e "$T/portable-run" || { echo "already present: $T/portable-run"; exit 1; }
+          python -I -m zipfile -e "$T/assets/litepack-$VERSION-windows-$ARCH-portable.zip" "$T/portable-run"
+          ls -la "$RUNF"
+      - name: A small .lpk and a small .zip with the portable lpk.exe
+        run: |
+          set -euo pipefail
+          mkdir -p "$PW/in/sub"
+          for i in 1 2 3; do echo "file $i" > "$PW/in/sub/f$i.txt"; done
+          "$RUNF/lpk.exe" a "$PW/small.lpk" "$PW/in"
+          "$RUNF/lpk.exe" export "$PW/small.lpk" "$PW/small.zip"
+          ls -la "$PW"
+      - name: The portable GUI opens the .lpk, then the .zip (a foreign archive)
+        run: |
+          set -euo pipefail
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$PW/report-$a.json" timeout 180 "$RUNF/lpk-gui.exe" "$PW/$a"
+            report="$(cat "$PW/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          ls -la "$RUNF" "$RUNF/data"
+      - name: The portable residue after the GUI (the worker profile required)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/p2-after-gui.json"
+          cmdkey /list > "$SNAP/cmdkey-p2-after-gui.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p2-after-gui.txt"; then
+            echo "p2-after-gui: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/p1-before.json" "$SNAP/p2-after-gui.json" \
+            --require-worker-profile || echo "portable, after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
+      - name: The portable residue after --remove-profile (nothing allowed)
+        run: |
+          "$RUNF/lpk-worker.exe" --remove-profile
+          python -I scripts/e7-residue.py snapshot "$SNAP/p3-after-remove.json"
+          cmdkey /list > "$SNAP/cmdkey-p3-after-remove.txt"
+          if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p3-after-remove.txt"; then
+            echo "p3-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
+          fi
+          python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/p1-before.json" "$SNAP/p3-after-remove.json" \
+            || echo "portable, after --remove-profile: residue" >> "$SNAP/verdicts"
+      - name: Residue verdict
+        run: |
+          if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
+          echo "verify $ARCH: installed, used and uninstalled, and the portable copy run, with nothing left but the allowed entries"
