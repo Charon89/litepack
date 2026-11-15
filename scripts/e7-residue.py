@@ -2,8 +2,15 @@
 
     python -I scripts/e7-residue.py snapshot <out.json> [--on-ci]
     python -I scripts/e7-residue.py diff <before.json> <after.json>
-        [--allow-worker-profile | --require-worker-profile] [--allow-settings]
+        [--allow-worker-profile | --require-worker-profile] [--allow-settings] [--verdict all|litepack]
     python -I scripts/e7-residue.py --self-test
+
+--verdict litepack (R408; release.yml's verify-arm64 alone): an entry not allowed is a verdict only when it is
+LitePack's own (`litepack_own`: `litepack`, `lpk`, LitePack's CLSID or its jump list's a233dcd0c3d36a7d in its path,
+value name or data, or in their ROT13 (UserAssist); in or naming the run folder; under Run, RunOnce,
+HKCU\\Environment, RegisteredApplications, Classes\\.lpk or Uninstall; the worker profile's SID; in the temp folder's
+NSIS folders ns?XXXX.tmp and ~nsu*.tmp; an added AppContainer mapping Mappings\\S-1-15-2-...; R410), and an unreadable
+path always is. Any other is printed as `OTHER:` and counted, not a verdict: a removal under another name too (R411).
 
 `snapshot` refuses unless GITHUB_ACTIONS=true or --on-ci is given: use it only on a disposable
 machine. Every path it cannot read is printed and recorded; `diff` reports such a path as
@@ -63,6 +70,7 @@ that belong to it, nothing else:
 
 import argparse
 import codecs
+import io
 import json
 import os
 import re
@@ -138,7 +146,10 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
 # holding nothing), `file-changed` (that one file, changed only: never added or removed), `key-pattern`
 # (the keys whose whole path matches a regular expression, and their values; not their subkeys),
-# `key-pattern-only` (those keys' existence alone, not their values or subkeys; R373). Any
+# `key-pattern-only` (those keys' existence alone, not their values or subkeys; R373), `dir-pattern` (folders
+# directly in one folder whose names match one shape, a folder in the later snapshot; R401),
+# `file-in-dir-pattern` (files of one name shape directly inside such a folder, `dir` its shape, a file in the
+# later snapshot; R401). Any
 # entry may carry `signs`, the signs it may excuse ("+" added, "-" removed, "~" changed); without it,
 # every sign its kind allows. A value-pattern's name may hold `{temp}`: the user's temp folder in its
 # long form (`temp_folder()`).
@@ -177,7 +188,60 @@ CONSENT_KEYS = [CONSENT_STORE + "\\" + c + s
 CONSENT_PARENTS = ("Windows' Capability Access Manager setting up the user's consent store (the two keys alone, "
                    "empty; CI run 43718620349's portable job, R388); LitePack writes nothing under it")
 IDENTITY_CRL = r"HKCU\Software\Microsoft\IdentityCRL\Immersive\production"
+# R401 (release.yml run 43738180914's verify jobs: x64 job 132893507301, ARM64 job 132893507494).
+R401 = "R401, CI run 43738180914"
+SECURITY_MAINTENANCE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Security and Maintenance"
+HELIUM = (r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy\SystemAppData"
+          r"\Helium")
+EXPLORER_STARTUP_LOG = r"%LOCALAPPDATA%\Microsoft\Windows\Explorer\ExplorerStartupLog.etl"
+APPLICATION_VIEW = (r"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo\\[0-9]+"
+                    r"\\ApplicationViewManagement\\W32:[0-9A-F]{16}")
+USER_TEMP = r"%LOCALAPPDATA%\Temp"
+# NSIS's plugin folder ($PLUGINSDIR), named by GetTempFileName: "ns", a letter, and its unique part, one to four
+# hexadecimal digits (nsrE5B7 and nsf1311 in CI run 43738180914, nsi2CA in run 43742607535; R404).
+NSIS_PLUGINS_DIR = r"ns[a-z][0-9A-F]{1,4}\.tmp"
+NSIS_PLUGINS = ("NSIS's plugin folder of the x86 installer or uninstaller, which NSIS deletes at exit but cannot "
+                "under Windows on ARM's emulation while System.dll is still mapped (R401, windows-11-arm, CI run "
+                "43738180914)")
+# R406 (release.yml run 43746466112's verify-arm64, job 132919011093): two programs of the windows-11-arm image that
+# write on their own schedule, in folders of their own.
+CBS_WEBVIEW = r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\LocalState\EBWebView"
+FIREFOX_BACKGROUND_TASKS = r"%APPDATA%\Mozilla\Firefox\Background Tasks Profiles"
+# R407 (CI run 43750018894's portable job, windows-2025; release.yml run 43750018868's verify-arm64): Windows' device
+# census recording its scheduled run for the user, and the Widgets package's settings hive log beside its Helium ones.
+CENSUS = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Census"
+WEBEXPERIENCE_SETTINGS = r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy\Settings"
 ALLOW = [
+    # R407.
+    {"kind": "key", "path": CENSUS,
+     "reason": "Windows' device census (its scheduled Census task) recording its last run for the user; LitePack "
+               "writes nothing under it (R407, CI run 43750018894)"},
+    {"kind": "file-changed-pattern", "path": WEBEXPERIENCE_SETTINGS, "name": r"settings\.dat\.LOG[12]",
+     "reason": "the Widgets package's own settings hive log, which Windows rewrites on its own (R407)"},
+    # R406.
+    {"kind": "file", "path": CBS_WEBVIEW,
+     "reason": "the WebView2 data of Windows' own Start and Search client package (Client.CBS), which its "
+               "component updater fills and rewrites on its own schedule; LitePack's WebView2 data is in its own "
+               "folder (R406, CI run 43746466112)"},
+    {"kind": "file", "path": FIREFOX_BACKGROUND_TASKS,
+     "reason": "Firefox's background tasks (its default-browser agent, a scheduled task of the runner image's "
+               "Firefox), which rewrite their own profiles; LitePack writes nothing there (R406, CI run "
+               "43746466112)"},
+    # R401.
+    {"kind": "key", "path": SECURITY_MAINTENANCE,
+     "reason": "Windows' Security and Maintenance setting up its checks for a user on its own schedule; LitePack "
+               "writes nothing under it (" + R401 + ")"},
+    {"kind": "file-changed-pattern", "path": HELIUM, "name": r"(User|UserClasses)\.dat\.LOG[12]",
+     "reason": "the Widgets package's own registry hive logs, which Windows rewrites on its own (R401)"},
+    {"kind": "file-changed", "path": EXPLORER_STARTUP_LOG,
+     "reason": "Explorer's own start-up trace log (R401)"},
+    # R404 (CI run 43742607535): removed too, when a window that existed at the baseline closes later.
+    {"kind": "key-pattern", "path": APPLICATION_VIEW, "signs": "+-",
+     "reason": "Explorer's per-session record of a window it showed (a session's volatile key, cleared at "
+               "logoff) (R401, R404)"},
+    {"kind": "dir-pattern", "path": USER_TEMP, "name": NSIS_PLUGINS_DIR, "signs": "+", "reason": NSIS_PLUGINS},
+    {"kind": "file-in-dir-pattern", "path": USER_TEMP, "dir": NSIS_PLUGINS_DIR, "name": r"System\.dll",
+     "signs": "+", "reason": NSIS_PLUGINS + ": its System.dll"},
     # R365.
     {"kind": "file",
      "path": r"%APPDATA%\Microsoft\Windows\Recent\CustomDestinations"
@@ -259,10 +323,12 @@ ALLOW = [
     {"kind": "value", "path": r"HKCU\Software\Microsoft\AuthCookies\Live\Default\DIDC",
      "name": "Data", "reason": WAM + ": the Microsoft account device cookie"},
     # The hex subkey differs between runs (1a4, 1a7); the names must point at a DLL of Windows' own
-    # system folder (no backslash in the DLL's name), never at the install or run folder (R352).
+    # system folder (no backslash in the DLL's name), never at the install or run folder (R352); or a bare DLL
+    # name whose name holds neither lpk nor litepack (R401: @windows.storage.dll,-21791 on windows-11-arm).
     {"kind": "value-pattern", "key": re.escape(LOCAL_SETTINGS) + r"\\MuiCache\\[0-9a-f]+\\52C64B7E",
      "name": (r"(@%SystemRoot%\\System32\\[\w.-]+\.dll,-[0-9]+"
-              r"|C:\\Windows\\system32,@[\w.-]+\.dll,-[0-9]+)"),
+              r"|C:\\Windows\\system32,@[\w.-]+\.dll,-[0-9]+"
+              r"|@(?![\w.-]*(lpk|litepack))[\w.-]+\.dll,-[0-9]+)"),
      "reason": "Windows' cache of the display strings it loads from its own DLLs (MuiCache), "
                "filled when a program starts"},
     {"kind": "file-changed-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Windows\Explorer",
@@ -653,6 +719,18 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
             folder, _, leaf = path.rpartition("\\")
             if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
                 return a["reason"]
+        if a["kind"] == "dir-pattern" and kind == "file":
+            folder, _, leaf = path.rpartition("\\")
+            if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE) and \
+                    after["files"].get(path, {}).get("kind") == "dir":
+                return a["reason"]
+        if a["kind"] == "file-in-dir-pattern" and kind == "file":
+            folder, _, leaf = path.rpartition("\\")
+            parent, _, sub = folder.rpartition("\\")
+            if norm(parent) == norm(a["path"]) and re.fullmatch(a["dir"], sub, re.IGNORECASE) and \
+                    re.fullmatch(a["name"], leaf, re.IGNORECASE) and \
+                    after["files"].get(path, {}).get("kind") == "file":
+                return a["reason"]
         if a["kind"] == "file-changed" and kind == "file" and sign == "~" and \
                 norm(path) == norm(a["path"]):
             return a["reason"]
@@ -904,10 +982,75 @@ def settings_only(after):
     return all(norm(p) == norm(SETTINGS_FILE) for p in inside)
 
 
-def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uninstaller=False):
+# R408: `diff --verdict litepack` (verify-arm64 alone): a residue line is a verdict only when it is LitePack's own.
+# The names that make it so (case-blind, in its path, value name or data): LitePack itself (org.litepack.gui and
+# LitePack.Worker too), `lpk` (lpk.exe, .lpk, lpk_shell.dll), its shell CLSID, and the jump list's file name for its
+# AppUserModelID (installer.nsh).
+LITEPACK_MARKS = ("litepack", "lpk", norm(LITEPACK_CLSID), "a233dcd0c3d36a7d")
+VERDICT_REASON = "no verdict with --verdict litepack"
+
+
+def verdict_keys():
+    """The keys LitePack must never leave anything under, whatever its name (R408): R380's rule 5 list
+    (R380_NEVER_KEYS: Run, RunOnce, HKCU\\Environment), RegisteredApplications, Classes\\.lpk and Uninstall."""
+    return R380_NEVER_KEYS + [REGISTERED_APPS, CLASSES + r"\.lpk", CURRENT_VERSION + r"\Uninstall"]
+
+
+def expand_root(path):
+    """A snapshot path with its %ROOT% token replaced by the folder it names (None if unknown)."""
+    m = re.match(r"%([A-Z]+)%(.*)", path)
+    if not m:
+        return path
+    folder = root_dir(m.group(1))
+    return folder.rstrip("\\") + m.group(2) if folder else None
+
+
+# R410: the temp folder's NSIS folders LitePack's own installer and uninstaller make (the verify jobs run no other
+# NSIS installer): the plugin folder (R401, R404) and the uninstaller's copy (R312).
+NSIS_TEMP_DIRS = (NSIS_PLUGINS_DIR, r"~nsu[0-9a-z]*\.tmp")
+
+
+def litepack_own(kind, path, name, rec, run, worker_sids=(), sign="+"):
+    """R408, R410: whether a residue line is LitePack's own: a LitePack mark in its path, value name or data, or in
+    their ROT13 (UserAssist's value names); or it lies in (a file) or names (any text, or its ROT13) the run folder;
+    or it lies under a key of `verdict_keys()`; or it is the worker profile's (its SID); or it lies in one of the
+    temp folder's NSIS folders (`NSIS_TEMP_DIRS`); or it is an added AppContainer mapping, a key
+    Mappings\\S-1-15-2-... or a value in it (the worker's, emptied, has no Moniker left to name it)."""
+    texts = [path, name or ""] + ([rec] if kind == "value" and isinstance(rec, str) else [])
+    texts += [rot13(t) for t in texts]
+    if kind == "file":
+        rel = path[len(USER_TEMP) + 1:] if under(path, USER_TEMP) and norm(path) != norm(USER_TEMP) else None
+        if rel is not None and any(re.fullmatch(p, rel.split("\\")[0], re.IGNORECASE) for p in NSIS_TEMP_DIRS):
+            return True
+    elif sign == "+":
+        # A value's path is its key's.
+        parent, _, leaf = path.rpartition("\\")
+        if norm(parent) == norm(MAPPINGS) and norm(leaf).startswith("s-1-15-2-"):
+            return True
+    for t in texts:
+        t = norm(t)
+        if any(m in t for m in LITEPACK_MARKS):
+            return True
+    if run:
+        r = norm(str(run).replace("/", "\\").rstrip("\\"))
+        # A .reg export doubles the backslashes inside string data.
+        if any(r in norm(t) or r.replace("\\", "\\\\") in norm(t) for t in texts):
+            return True
+        if kind == "file":
+            real = expand_root(path)
+            if real is not None and under(real, r):
+                return True
+    if kind != "file" and any(under(path, k) for k in verdict_keys()):
+        return True
+    parts = [norm(p) for p in path.split("\\")]
+    return any(p in worker_sids for p in parts)
+
+
+def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uninstaller=False, verdict="all"):
     """The diff's lines and the number of entries not allowed. A path unreadable in either
     snapshot is listed (and counted unless allowed) even when both record it alike: what lies
-    inside it was not seen."""
+    inside it was not seen. With verdict="litepack" (R408), a line not allowed that is not LitePack's own
+    (`litepack_own`) is printed as OTHER and not counted."""
     b, a = entries(before), entries(after)
     sids = profile_sids(before, after)
     changes = []
@@ -953,6 +1096,9 @@ def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uni
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
                 not unread:
             lines.append(f"profile: {text}")
+        # R410: an unreadable path stays a verdict in every mode (what lies inside it was not seen).
+        elif verdict == "litepack" and not unread and not litepack_own(kind, path, name, rec, run, sids, sign):
+            lines.append(f"OTHER: {text}")
         else:
             lines.append(f"RESIDUE: {text}")
             bad += 1
@@ -996,6 +1142,9 @@ def main(argv):
                    help=r"allow %%APPDATA%%\LitePack\settings.json alone (an uninstall without the box)")
     d.add_argument("--allow-uninstaller-copy", action="store_true",
                    help=r"R312: allow %%LOCALAPPDATA%%\Temp\~nsu*.tmp holding one Un.exe alone")
+    d.add_argument("--verdict", choices=("all", "litepack"), default="all",
+                   help="R408: `litepack` makes only LitePack's own residue a verdict (release.yml's verify-arm64); "
+                        "the rest is printed as OTHER")
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
         snapshot(a.out, a.on_ci)
@@ -1006,11 +1155,16 @@ def main(argv):
     if run is None and os.environ.get("RUNNER_TEMP"):
         run = os.path.join(os.environ["RUNNER_TEMP"], "portable-run", "LitePack")
     lines, bad = diff(load(a.before), load(a.after), allow, run, a.allow_settings,
-                      a.allow_uninstaller_copy)
+                      a.allow_uninstaller_copy, a.verdict)
     for line in lines:
         print(line)
     flag = " (worker profile allowed)" if allow else ""
-    print(f"{len(lines)} differences{flag}, {bad} not allowed")
+    if a.verdict == "litepack":
+        other = sum(1 for line in lines if line.startswith("OTHER: "))
+        print(f"{len(lines)} differences{flag}, {bad + other} not allowed: {bad} LitePack's, {other} other "
+              f"({VERDICT_REASON})")
+    else:
+        print(f"{len(lines)} differences{flag}, {bad} not allowed")
     missing = profile_present(lines) if a.require_worker_profile else []
     for m in missing:
         print(f"PROFILE MISSING: {m}")
@@ -1845,6 +1999,262 @@ class Tests(unittest.TestCase):
         for kind, path in (("key", STORAGE_SENSE + "X"), ("value", STORAGE_SENSE + r"X\Parameters"),
                            ("key", CURRENT_VERSION + r"\Storage")):
             self.assertIsNone(allowed(kind, path, "01", "+", snap()), path)
+
+    def test_r401_security_and_maintenance_is_allowed_and_a_sibling_is_not(self):
+        guid = "{01979C6A-42FA-414C-B8AA-EEE2C8202018}"
+        for sign in "+~-":
+            self.assertIn("R401", allowed("key", SECURITY_MAINTENANCE + r"\Checks\\" + guid + ".check.100", None,
+                                          sign, snap()) or "")
+            self.assertIn("R401", allowed("value", SECURITY_MAINTENANCE + r"\Providers\EventLog\\" + guid,
+                                          "Enabled", sign, snap()) or "")
+        for kind, path in (("key", SECURITY_MAINTENANCE + "X"), ("value", CURRENT_VERSION + r"\Security"),
+                           ("key", CURRENT_VERSION + r"\Action Center")):
+            self.assertIsNone(allowed(kind, path, "x", "+", snap()), path)
+
+    def test_r407_the_device_census_and_the_widgets_settings_log_and_their_siblings(self):
+        for sign in "+~-":
+            self.assertIn("R407", allowed("key", CENSUS, None, sign, snap()) or "")
+            for name in ("ReturnCode", "StartTime", "StartTimeBin"):
+                self.assertIn("R407", allowed("value", CENSUS, name, sign, snap()) or "", (sign, name))
+        for leaf in ("settings.dat.LOG2", "settings.dat.LOG1", "Settings.dat.log2"):
+            self.assertIn("R407", allowed("file", WEBEXPERIENCE_SETTINGS + "\\" + leaf, None, "~", snap()) or "", leaf)
+        current = CENSUS.rsplit("\\", 1)[0]
+        for kind, path, name in (("key", current + r"\CensusX", None), ("value", current + r"\Census2", "StartTime"),
+                                 ("value", current, "Census"), ("key", r"HKCU\Software\Census", None)):
+            self.assertIsNone(allowed(kind, path, name, "+", snap()), path)
+        ws = WEBEXPERIENCE_SETTINGS
+        misses = [("+", ws + r"\settings.dat.LOG2"), ("-", ws + r"\settings.dat.LOG1"),
+                  ("~", ws + r"\settings.dat"), ("~", ws + r"\settings.dat.LOG3"),
+                  ("~", ws + r"\Sub\settings.dat.LOG1"), ("~", ws.rsplit("\\", 1)[0] + r"\settings.dat.LOG1")]
+        for sign, path in misses:
+            self.assertIsNone(allowed("file", path, None, sign, snap()), (sign, path))
+
+    def test_r406_windows_shell_webview_data_and_firefox_background_tasks_and_their_siblings(self):
+        for sign in "+~-":
+            for path in (CBS_WEBVIEW + r"\hyphen-data\120.0.6050.0\hyph-en-us.hyb",
+                         CBS_WEBVIEW + r"\component_crx_cache\metadata.json", CBS_WEBVIEW + r"\Local State",
+                         FIREFOX_BACKGROUND_TASKS + r"\qh3smhym.MozillaBackgroundTask-308046B0AF4A39CB-defaultagent"
+                         r"\prefs.js"):
+                self.assertIn("R406", allowed("file", path, None, sign, snap()) or "", (sign, path))
+        cbs = CBS_WEBVIEW.rsplit("\\", 1)[0]
+        misses = [cbs + r"\Other\x.json", cbs + r"\EBWebViewX\x.json",
+                  CBS_WEBVIEW.replace("Client.CBS", "Client.CBSX") + r"\x.json",
+                  r"%APPDATA%\Mozilla\Firefox\Profiles\abc.default\prefs.js",
+                  FIREFOX_BACKGROUND_TASKS + "X" + r"\prefs.js",
+                  r"%LOCALAPPDATA%\org.litepack.gui\EBWebView\Local State"]
+        for path in misses:
+            self.assertIsNone(allowed("file", path, None, "+", snap()), path)
+        # A registry path under the same names is not a file: nothing excuses it.
+        self.assertIsNone(allowed("key", r"HKCU\Software\Mozilla\Firefox\Background Tasks Profiles", None, "+",
+                                  snap()))
+
+    def test_r401_the_widgets_hive_logs_and_explorers_startup_log_changed_only(self):
+        for leaf in ("UserClasses.dat.LOG2", "User.dat.LOG2", "User.dat.LOG1", "userclasses.dat.log1"):
+            self.assertIn("R401", allowed("file", HELIUM + "\\" + leaf, None, "~", snap()) or "", leaf)
+        self.assertIn("R401", allowed("file", EXPLORER_STARTUP_LOG, None, "~", snap()) or "")
+        misses = [("+", HELIUM + r"\User.dat.LOG2"), ("-", HELIUM + r"\UserClasses.dat.LOG1"),
+                  ("~", HELIUM + r"\User.dat"), ("~", HELIUM + r"\User.dat.LOG3"),
+                  ("~", HELIUM + r"\Sub\User.dat.LOG1"), ("~", HELIUM.rsplit("\\", 1)[0] + r"\User.dat.LOG1"),
+                  ("+", EXPLORER_STARTUP_LOG), ("-", EXPLORER_STARTUP_LOG),
+                  ("~", EXPLORER_STARTUP_LOG + ".old")]
+        for sign, path in misses:
+            self.assertIsNone(allowed("file", path, None, sign, snap()), (sign, path))
+
+    def test_r401_r404_explorers_window_record_is_allowed_added_or_removed(self):
+        si = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo"
+        key = si + r"\2\ApplicationViewManagement\W32:0000000000030378"
+        gone = si + r"\2\ApplicationViewManagement\W32:0000000000080016"  # R404: CI run 43742607535
+        for sign, k in (("+", key), ("-", gone)):
+            self.assertIn("R404", allowed("key", k, None, sign, snap()) or "", sign)
+            self.assertIn("R404", allowed("value", k, "VirtualDesktop", sign, snap()) or "", sign)
+        misses = [("~", "value", key, "VirtualDesktop"), ("~", "value", gone, "VirtualDesktop"),
+                  ("-", "key", si + r"\2\Other\W32:0000000000080016", None),
+                  ("-", "value", si + r"\2\Other\W32:0000000000080016", "VirtualDesktop"),
+                  ("-", "key", gone + r"\Sub", None),
+                  ("+", "key", key + r"\Sub", None),
+                  ("+", "key", si + r"\2\ApplicationViewManagement\W32:00000000000303", None),
+                  ("+", "key", si + r"\x\ApplicationViewManagement\W32:0000000000030378", None),
+                  ("+", "value", si + r"\2\ApplicationViewManagement", "x"),
+                  ("+", "key", si + r"\2\Other\W32:0000000000030378", None)]
+        for sign, kind, path, name in misses:
+            self.assertIsNone(allowed(kind, path, name, sign, snap()), (sign, kind, path, name))
+
+    def test_r401_the_muicache_allows_a_bare_windows_dll_name_never_lpks(self):
+        key = LOCAL_SETTINGS + r"\MuiCache\1d8\52C64B7E"
+        self.assertIsNotNone(allowed("value", key, "@windows.storage.dll,-21791", "+", snap()))
+        for name in ("@lpk_shell.dll,-1", "@LPK_SHELL.DLL,-1", "@LitePack.dll,-2", "@my-litepack-x.dll,-3",
+                     "@windows.storage.dll", "@sub\\windows.storage.dll,-1", "windows.storage.dll,-1"):
+            self.assertIsNone(allowed("value", key, name, "+", snap()), name)
+
+    def test_r401_nsis_plugin_folders_with_system_dll_alone_are_allowed_added_only(self):
+        t = r"%LOCALAPPDATA%\Temp"
+        files = {t + r"\nsrE5B7.tmp": {"kind": "dir"}, t + r"\nsrE5B7.tmp\System.dll": f(12288),
+                 t + r"\nsf1311.tmp": {"kind": "dir"}, t + r"\nsf1311.tmp\System.dll": f(12288)}
+        lines, bad = diff(self.base, snap(dict(self.base["files"], **files), self.base["registry"]), False)
+        self.assertEqual(bad, 0, lines)
+        self.assertTrue(all("R401" in line for line in lines), lines)
+        # Any other file in such a folder stays residue; so does a folder of another shape or place, a file
+        # of the folder's name, and a removal.
+        extra = dict(files, **{t + r"\nsrE5B7.tmp\nsExec.dll": f()})
+        lines, bad = diff(self.base, snap(dict(self.base["files"], **extra), self.base["registry"]), False)
+        self.assertEqual(bad, 1, lines)
+        self.assertIn(r"RESIDUE: + file %LOCALAPPDATA%\Temp\nsrE5B7.tmp\nsExec.dll", "\n".join(lines))
+        # R404: one to four hex digits (nsi2CA in CI run 43742607535), any case.
+        for leaf in ("nsa1.tmp", "nsi2CA.tmp", "nsb2ca.tmp", "nsf1311.tmp", "NSRE5B7.TMP"):
+            two = {t + "\\" + leaf: {"kind": "dir"}, t + "\\" + leaf + r"\System.dll": f(12288)}
+            lines, bad = diff(self.base, snap(dict(self.base["files"], **two), self.base["registry"]), False)
+            self.assertEqual(bad, 0, (leaf, lines))
+        for leaf in ("nsiE5B71.tmp", "nsi.tmp", "nsi2CG.tmp", "ns12CA.tmp", "nsi2C-.tmp"):
+            for extra in ({t + "\\" + leaf: {"kind": "dir"}}, {t + "\\" + leaf + r"\System.dll": f(12288)}):
+                after = snap(dict(self.base["files"], **extra), self.base["registry"])
+                self.assertEqual(diff(self.base, after, False)[1], 1, (leaf, extra))
+        misses = {t + r"\nsrE5B7X.tmp": {"kind": "dir"}, t + r"\abcE5B7.tmp": {"kind": "dir"},
+                  t + r"\sub\nsrE5B7.tmp": {"kind": "dir"}, t + r"\nsq0001.tmp": f(),
+                  t + r"\nsq0002.tmp\sub": {"kind": "dir"}, t + r"\nsq0002.tmp\sub\System.dll": f(),
+                  t + r"\nsq0003.tmp\System.dll.bak": f()}
+        for path, rec in misses.items():
+            after = snap(dict(self.base["files"], **{path: rec}), self.base["registry"])
+            self.assertEqual(diff(self.base, after, False)[1], 1, path)
+        before = snap(dict(self.base["files"], **files), self.base["registry"])
+        self.assertEqual(diff(before, self.base, False)[1], 4)
+
+    def test_r401_the_start_menus_tile_record_of_litepack_stays_residue(self):
+        key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties\W~org.litepack.gui"
+        self.assertIsNone(allowed("key", key, None, "+", snap()))
+        self.assertIsNone(allowed("value", key, "Category", "+", snap()))
+
+    # R408 (CI run 43753831748's verify-arm64): with --verdict litepack, only LitePack's own residue is a verdict.
+    R408_CLOUD = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+                  r"\$$windows.data.placeholdertilecollection\Current")
+    R408_CDM = (r"%LOCALAPPDATA%\Packages\Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy\Settings"
+                r"\settings.dat")
+
+    def r408(self, files=None, registry=None, before_files=None, before_registry=None, run=None, verdict="litepack"):
+        before = snap(dict(self.base["files"], **(before_files or {})),
+                      dict(self.base["registry"], **(before_registry or {})))
+        after = snap(dict(before["files"], **(files or {})), dict(before["registry"], **(registry or {})))
+        return diff(before, after, False, run, verdict=verdict)
+
+    def test_r408_litepacks_own_residue_stays_a_verdict(self):
+        run_key = CURRENT_VERSION + r"\Run"
+        cases = [
+            {"registry": {r"HKCU\Software\Vendor\Thing": {"Target": r'"C:\\Apps\\LitePack\\lpk-gui.exe"'}}},
+            {"registry": {r"HKCU\Software\Org.LitePack.Gui": {}}},
+            {"registry": {CLASSES + r"\CLSID\\" + LITEPACK_CLSID: {}}},
+            {"registry": {run_key: {"SomeUpdater": '"C:\\\\x\\\\u.exe"'}}},
+            {"before_registry": {r"HKCU\Environment": {"Path": '"C:\\\\a"'}},
+             "registry": {r"HKCU\Environment": {"Path": '"C:\\\\a;C:\\\\b"'}}},
+            {"registry": {REGISTERED_APPS: {"Other": '"x"'}}},
+            {"registry": {CURRENT_VERSION + r"\Uninstall\Other": {}}},
+            {"registry": {CLASSES + r"\.lpk\OpenWithProgids": {}}},
+            {"files": {r"%APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations"
+                       r"\a233dcd0c3d36a7d.automaticDestinations-ms": f()}},
+        ]
+        for c in cases:
+            lines, bad = self.r408(**c)
+            # (An added key of another name that holds LitePack's value is OTHER itself; its value is the verdict.)
+            self.assertGreaterEqual(bad, 1, (c, lines))
+            self.assertEqual(bad, sum(1 for line in lines if line.startswith("RESIDUE: ")), (c, lines))
+        with unittest.mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\U\AppData\Local"}):
+            run = "C:/U/AppData/Local/Apps/Run"
+            lines, bad = self.r408(files={r"%LOCALAPPDATA%\Apps\Run\x.txt": f()}, run=run)
+            self.assertEqual(bad, 1, lines)
+            # A value whose data names the run folder (doubled backslashes, as reg export writes it).
+            lines, bad = self.r408(registry={r"HKCU\Software\Vendor": {"p": r'"C:\\U\\AppData\\Local\\Apps\\Run\\a"'}},
+                                   run=run)
+            self.assertEqual(bad, 1, lines)
+            lines, bad = self.r408(files={r"%LOCALAPPDATA%\Apps\Runner\x.txt": f()}, run=run)
+            self.assertEqual(bad, 0, lines)
+
+    def test_r408_other_residue_is_printed_and_no_verdict_but_the_default_still_fails(self):
+        for c in ({"registry": {self.R408_CLOUD: {"Data": "hex:01,02"}}}, {"files": {self.R408_CDM: f()}},
+                  {"before_files": {self.R408_CDM: f()}, "files": {self.R408_CDM: f(size=2)}}):
+            lines, bad = self.r408(**c)
+            self.assertEqual(bad, 0, (c, lines))
+            self.assertTrue(lines and all(line.startswith("OTHER: ") for line in lines), (c, lines))
+        lines, bad = self.r408(registry={self.R408_CLOUD: {"Data": "hex:01,02"}}, verdict="all")
+        self.assertEqual(bad, 2, lines)
+        self.assertTrue(all(line.startswith("RESIDUE: ") for line in lines), lines)
+
+    def test_r410_an_unreadable_path_stays_a_verdict_in_litepack_mode(self):
+        start = r"%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+        unread = {start: {"kind": "unreadable", "error": "PermissionError"}}
+        for verdict in ("litepack", "all"):
+            lines, bad = self.r408(before_files=unread, verdict=verdict)
+            self.assertEqual((bad, lines), (1, [f"RESIDUE: ? unreadable {start} (PermissionError)"]), verdict)
+
+    def test_r410_userassist_rot13_names_are_litepacks(self):
+        for program in (r"C:\Users\runneradmin\AppData\Local\LitePack\uninstall.exe",
+                        r"D:\a\_temp\assets\LitePack_0.0.1_arm64-setup.exe",
+                        r"{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}\LitePack.lnk"):
+            lines, bad = self.r408(registry={USERASSIST_COUNT: {rot13(program): "hex:00,01"}})
+            self.assertEqual(bad, 1, (program, lines))
+            self.assertTrue(lines[-1].startswith("RESIDUE: + value"), lines)
+        # The run folder too, through ROT13, for a program in it without a mark of its own.
+        lines, bad = self.r408(registry={USERASSIST_COUNT: {rot13(r"C:\U\Apps\Run\tool.exe"): "hex:00"}},
+                               run="C:/U/Apps/Run")
+        self.assertEqual(bad, 1, lines)
+        # A UserAssist value of another program stays OTHER.
+        lines, bad = self.r408(registry={USERASSIST_COUNT: {rot13(r"C:\Windows\notepad.exe"): "hex:00"}})
+        self.assertEqual(bad, 0, lines)
+        self.assertTrue(lines and all(line.startswith("OTHER: ") for line in lines), lines)
+
+    def test_r410_anything_in_litepacks_nsis_temp_folders_is_a_verdict(self):
+        t = USER_TEMP
+        plugins = {t + r"\nsi2CA.tmp": {"kind": "dir"}, t + r"\nsi2CA.tmp\System.dll": f(12288),
+                   t + r"\nsi2CA.tmp\nsDialogs.dll": f()}
+        lines, bad = self.r408(files=plugins)
+        self.assertEqual(bad, 1, lines)
+        self.assertIn(r"RESIDUE: + file %LOCALAPPDATA%\Temp\nsi2CA.tmp\nsDialogs.dll", "\n".join(lines))
+        copy = {t + r"\~nsuA.tmp": {"kind": "dir"}, t + r"\~nsuA.tmp\Un.exe": f(), t + r"\~nsuA.tmp\extra.txt": f()}
+        before = snap(self.base["files"], self.base["registry"])
+        after = snap(dict(self.base["files"], **copy), self.base["registry"])
+        lines, bad = diff(before, after, False, allow_uninstaller=True, verdict="litepack")
+        self.assertEqual(bad, 3, lines)
+        self.assertFalse(any(line.startswith("OTHER: ") for line in lines), lines)
+        # Another temp folder of no NSIS shape stays OTHER.
+        lines, bad = self.r408(files={t + r"\tmpAB12.tmp": {"kind": "dir"}, t + r"\tmpAB12.tmp\x.dll": f()})
+        self.assertEqual(bad, 0, lines)
+        self.assertEqual(sum(1 for line in lines if line.startswith("OTHER: ")), 2, lines)
+
+    def test_r410_an_added_appcontainer_mapping_is_a_verdict(self):
+        sid_key = MAPPINGS + r"\S-1-15-2-11-22-33-44-55-66-77"
+        for registry in ({sid_key: {}}, {sid_key: {"DisplayName": '"x"'}}):
+            lines, bad = self.r408(registry=registry)
+            self.assertEqual(bad, len(lines), lines)
+        # Another package's mapping removed (Windows' own) stays OTHER; so does a key deeper than the mapping.
+        before = snap(self.base["files"], dict(self.base["registry"], **{sid_key: {}}))
+        lines, bad = diff(before, self.base, False, verdict="litepack")
+        self.assertEqual((bad, lines), (0, [f"OTHER: - key {sid_key}"]))
+        lines, bad = self.r408(before_registry={sid_key: {}}, registry={sid_key + r"\Children": {}})
+        self.assertEqual(bad, 0, lines)
+
+    def test_r411_a_removal_under_another_name_is_other_in_litepack_mode_and_a_verdict_by_default(self):
+        progids = CLASSES + r"\.zip\OpenWithProgids"
+        before = snap(self.base["files"], dict(self.base["registry"], **{progids: {"Other.zip": "hex(0):"}}))
+        after = snap(self.base["files"], dict(self.base["registry"], **{progids: {}}))
+        line = r"- value HKCU\Software\Classes\.zip\OpenWithProgids [Other.zip] = hex(0):"
+        self.assertEqual(diff(before, after, False, verdict="litepack"), ([f"OTHER: {line}"], 0))
+        self.assertEqual(diff(before, after, False), ([f"RESIDUE: {line}"], 1))
+
+    def test_r408_the_cli_counts_both_and_fails_only_on_litepacks(self):
+        with tempfile.TemporaryDirectory() as d:
+            b, a = Path(d) / "b.json", Path(d) / "a.json"
+            b.write_text(json.dumps(self.base), encoding="utf-8")
+            reg = dict(self.base["registry"], **{self.R408_CLOUD: {}})
+            a.write_text(json.dumps(snap(self.base["files"], reg)), encoding="utf-8")
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out):
+                rc = main(["diff", str(b), str(a), "--verdict", "litepack"])
+                rc_all = main(["diff", str(b), str(a)])
+            self.assertEqual((rc, rc_all), (0, 1), out.getvalue())
+            self.assertIn("1 differences, 1 not allowed: 0 LitePack's, 1 other (no verdict with --verdict "
+                          "litepack)", out.getvalue())
+            reg[r"HKCU\Software\LitePack"] = {}
+            a.write_text(json.dumps(snap(self.base["files"], reg)), encoding="utf-8")
+            with unittest.mock.patch("sys.stdout", io.StringIO()) as out2:
+                self.assertEqual(main(["diff", str(b), str(a), "--verdict", "litepack"]), 1)
+            self.assertIn("2 not allowed: 1 LitePack's, 1 other", out2.getvalue())
 
     def test_r380_the_parser_reads_shows_format(self):
         self.assertEqual(parse_shown(r'+ value HKCU\A [@] = "x"'), ("+", "value", r"HKCU\A", "", '"x"'))

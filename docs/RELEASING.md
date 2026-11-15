@@ -390,6 +390,79 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   extracts through the sandboxed worker, compared again. From the portable zip, the GUI opens the `.lpk` and the
   `.zip` under `LPK_GUI_SMOKE_REPORT`, each report with no problems and rows rendered (as `ci.yml`'s `portable` job),
   then `lpk-worker.exe --remove-profile` removes the worker's profile.
+- `verify-x64` (windows-2025) and `verify-arm64` (windows-11-arm, part 1e): the release's own installer and portable
+  zip of the runner's architecture, as a user gets them (`docs/notes/e7-design.md` section 1's `verify`, sections 3
+  and 5). Each needs `preflight` and `assemble`, downloads `release-assets`, and checks `SHA256SUMS` against
+  `assemble`'s output, then `sha256sum -c`. Python is setup-python's 3.13.7; on windows-11-arm it is the x64 build
+  (`architecture: x64`), because setup-python cannot install 3.13.7 for ARM64 there. It runs under Windows 11's x64
+  emulation, where x64 programs are expected to see the native registry view and System32 (only x86 programs are
+  WOW64-redirected); CI run 43738180914 ran the residue tool so. The job prints `platform.machine()`, `sys.version`
+  and `PROCESSOR_ARCHITECTURE`. The steps mirror `ci.yml`'s `portable` and `installer` jobs, the portable part first,
+  on the fresh runner, so that nothing the install sets off in Windows lands in its diffs (R400):
+  - The portable snapshot: a snapshot (and `cmdkey /list`), the portable zip unzipped with `zipfile` into
+    `RUNNER_TEMP\portable-run`, outside the profile; its `lpk.exe` makes a `.lpk` and a `.zip`, and its GUI opens
+    both under `LPK_GUI_SMOKE_REPORT` (each report names the archive, has no problems and rendered rows). The GUI's
+    WebView2 browser processes (those whose command line names the copy's `data\WebView2`) must be gone within 30 s
+    (`ci.yml`'s `webview2_gone`, through `pwsh`; without `pwsh`, every `msedgewebview2.exe` from `tasklist`). Then a
+    diff that must show the worker's profile (`--require-worker-profile`), `lpk-worker.exe --remove-profile` and a
+    diff that allows nothing; `cmdkey /list` must name no LitePack credential after each.
+  - The install: `e7-residue.py snapshot`; `LitePack_<v>_<arch>-setup.exe /S` (exit 0 within 300 s); the installed
+    layout (the six PEs, `uninstall.exe`, the notices and both licences, each compared with the repository's with
+    `cmp`); `e7-installer-check.py installed <install> <v>` (the Uninstall key, the user `Path`, route C, the `.lpk`
+    association and `GuiPath`); every installed PE at the runner's machine (`e7-pe-sections.py --machine`, 0x8664 or
+    0xAA64).
+  - `lpk` found through the user `Path`: `HKCU\Environment`'s `Path` read (read-only, as `e7-installer-check.py`
+    reads it), its entries expanded; the first that holds `lpk.exe` must be the install's `bin\`, and its
+    `lpk --version` names the version. With it a small folder round-trips through `a` and `x`, and `lpk export`
+    writes a `.zip`.
+  - The installed GUI opens the `.lpk` and the `.zip` (checked as above), its WebView2 processes (command line
+    naming `org.litepack.gui\WebView2`) must be gone within 30 s, so that the uninstall finds the data folder
+    unlocked; then a snapshot and a diff that must show the worker's profile, made by the GUI's own worker run
+    (`--require-worker-profile --allow-settings --run-folder <install>`). Only then do `lpk l` and `lpk x` read the
+    `.zip` through the installed `bin\lpk-worker.exe` (as `ci.yml`).
+  - `uninstall.exe /S`, waited on with `e7-wait-uninstaller.sh`; no install folder left; a snapshot and the diff
+    against the install's snapshot with `ci.yml`'s uninstall flags (`--allow-settings --allow-uninstaller-copy
+    --run-folder <install>`; the profile not allowed). The temp folder's `ns*.tmp` folders are listed with their
+    files after the install and after the uninstall (no verdict): on Windows on ARM, NSIS's plugin folder of the x86
+    installer or uninstaller (`ns<letter><one to four hex digits>.tmp`, `GetTempFileName`'s name, holding
+    `System.dll`) can stay in the temp folder after an install or an uninstall, as NSIS cannot delete the DLL while
+    x86 emulation still maps it; `e7-residue.py` allows that folder with `System.dll` alone (R401, R404).
+  - The Start menu's tile records (`HKCU\...\CurrentVersion\Start\TileProperties`) are listed read-only with
+    `reg query` after the portable GUI, right after the install and right before the uninstall (no verdict), to show
+    whether LitePack's record comes with the shortcut or with the running window (R403); the uninstaller deletes
+    `W~org.litepack.gui` (R401).
+  - Every diff and wait records a verdict line and the job goes on, so one run prints all of them; the last step
+    fails on any. A WebView2 query that fails (`pwsh` with `$ErrorActionPreference = "Stop"`, or `tasklist` itself)
+    is a verdict too (R403).
+  - **verify-arm64's residue verdicts are scoped to LitePack's own records (R408).** Four runs of `verify-arm64`
+    showed four different sets of records the windows-11-arm image wrote on its own: a client Windows still running
+    its first-logon tasks while the job runs (Store and Widgets packages, CloudStore, notifications, start-up
+    notifications), so a per-record allow-list does not converge there. Its two portable diffs (after the GUI and
+    after `--remove-profile`) and its uninstall diff run `e7-residue.py diff --verdict litepack`. There a line not
+    allowed is still a verdict when it is LitePack's: `litepack`, `lpk`, LitePack's shell CLSID or its jump list's
+    `a233dcd0c3d36a7d` in its path, value name or data, or in their ROT13 (Explorer's UserAssist names programs so);
+    a file in, or any text naming (also in ROT13), the run folder; anything under `Run`, `RunOnce`,
+    `HKCU\Environment`, `RegisteredApplications`, `Classes\.lpk` or `Uninstall`, whatever its name; the worker
+    profile's SID; anything in the temp folder's NSIS folders of LitePack's installer and uninstaller (`ns?XXXX.tmp`,
+    `~nsu*.tmp`; the job runs no other NSIS installer); an added AppContainer mapping
+    (`...\AppContainer\Mappings\S-1-15-2-...`, a key or a value in it: the worker's, once emptied, has no `Moniker`
+    left to name it); and any path a snapshot could not read (R410). Every other line is printed as `OTHER:` for
+    reading and counted in the summary (`N not allowed: M LitePack's, K other`), but fails nothing. That includes a
+    removal under a name not LitePack's, such as another program's `.zip` value deleted: it prints as `OTHER` here,
+    because Windows removes records of its own on this runner during the job (CI run 43757926736), while
+    `verify-x64`'s and `ci.yml`'s strict diffs fail on it, and the same code runs on both (R411). The mid-test diff
+    after the installed GUI keeps its
+    one verdict, a missing worker profile. `verify-x64`, both its diffs, and every `ci.yml` job stay strict (every
+    line not allowed is a verdict); LitePack runs the same code on both architectures, and `verify-x64` passed strict
+    on three runs running. The cost if this is wrong: a write LitePack made on ARM64 alone, into a Windows area under
+    a name not its own, would be printed but would not fail the job. R401 to R407's entries stay, so the `OTHER`
+    lines stay few.
+  Their results gate nothing yet: no tag and no release exist. The allowances `e7-residue.py` makes were ruled on
+  from each runner's own records (R365, R372, R380, R388; R401, R404 and R406 for the verify jobs' first runs),
+  never guessed. The windows-11-arm image, a client Windows with Store apps and Firefox, writes more on its own than
+  windows-2025 does; each run so far showed a few records of its own (R406: the Start and Search client's WebView2
+  data and Firefox's background tasks; R407: the Widgets package's settings hive log). Windows' device census,
+  which records its scheduled run under `CurrentVersion\Census`, is allowed on both runners (R407). The signing checks and the upgrade from a previous public release are part 2's.
 
 **The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
 names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,
@@ -427,9 +500,9 @@ any PC that is not ARM64. The x64 installer refuses on ARM64, as before, and on 
 **Unsigned, and deferred to part 2.** Every PE and both installers are unsigned. Part 2 adds signing (with
 `signtool verify`), its deployment target, attestation, the draft release and the tag trigger, the updater's
 `latest.json` signature, and the proof that the bundler downloads nothing (here it may fetch NSIS itself). The later
-steps of part 1 add the rest: part 1d the SBOMs (E8-6's half; done, above), and part 1e the install checks on both architectures (a silent install of each
-architecture's installer, its layout and notices, the GUI and `bin\lpk.exe` on a `.lpk` and a `.zip`, a silent
-uninstall and the residue diff). Part 2 then signs the PEs and both installers, and `assemble` checks the
+steps of part 1 add the rest: part 1d the SBOMs (E8-6's half; done, above), and part 1e the install checks on both architectures (`verify-x64` and
+`verify-arm64`, above: a silent install of each architecture's installer, its layout and notices, the GUI and
+`bin\lpk.exe` on a `.lpk` and a `.zip`, a silent uninstall and the residue diff, and the portable snapshot). Part 2 then signs the PEs and both installers, and `assemble` checks the
 artefacts against the signed files instead (`docs/notes/e7-design.md` section 1). Signing also changes the bytes of
 the NSIS parts inside each installer: when it can sign, tauri-bundler 2.10.4 signs its own copies of the
 `Plugins/x86-unicode` plugins before makensis packs them, and the stub the uninstaller is rebuilt from is the signed
