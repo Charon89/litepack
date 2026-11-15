@@ -1183,6 +1183,13 @@ jobs:
           alive="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' }).Count" | tr -d '\r')"
           echo "LitePack GUIs running after the update: $alive"
           test "$alive" -ge 1 || { echo "the GUI the installer restarted is not running"; exit 1; }
+          # R365: the plugin exits before removing its download; the restarted GUI's start removes it.
+          left=""
+          for d in "$TMPW"/LitePack-*-updater-*; do
+            if [ -d "$d" ]; then left=1; echo "still in the temp folder: $d"; ls -la "$d"; fi
+          done
+          if [ -n "$left" ]; then echo "the restarted GUI did not remove the update's download (R365)"; exit 1; fi
+          echo "no update download left in $TMPW"
           # The installer's /R started N+1's GUI again: stop it (its own check is not due today).
           pwsh -NoProfile -Command 'Get-Process lpk-gui -ErrorAction SilentlyContinue | Format-Table Id, Path; Get-Process lpk-gui -ErrorAction SilentlyContinue | Stop-Process -Force'
           sleep 3

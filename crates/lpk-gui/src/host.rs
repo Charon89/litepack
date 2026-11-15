@@ -1356,6 +1356,25 @@ pub fn run() -> i32 {
             // older than a day are swept.
             delete_shell_files(&startup_files);
             lpk_gui::shellfile::sweep();
+            // R365: the updater plugin exits before removing its download (the installer, in a
+            // folder of the temp folder): the installed copy removes those up to its own version,
+            // at once and 5 s and 30 s later (the installer that started it may still be running).
+            #[cfg(feature = "updater")]
+            if lpk_gui::update::mode(paths::dirs().portable) == lpk_gui::update::Mode::Install {
+                let info = a.package_info();
+                let (name, version) = (info.name.clone(), info.version.to_string());
+                let _ = std::thread::Builder::new()
+                    .name("update-download".into())
+                    .spawn(move || {
+                        let temp = std::env::temp_dir();
+                        for wait in [0, 5, 30] {
+                            std::thread::sleep(Duration::from_secs(wait));
+                            if lpk_gui::update::sweep_downloads(&temp, &name, &version) == 0 {
+                                break;
+                            }
+                        }
+                    });
+            }
             let (settings, settings_warning) = Store::open(paths::settings_file());
             if let Some(w) = &settings_warning {
                 eprintln!("lpk-gui: {w}");

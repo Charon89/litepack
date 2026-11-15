@@ -700,6 +700,31 @@ fn the_uninstaller_removes_the_jump_list_of_this_identifier() {
 }
 
 #[test]
+fn the_uninstaller_removes_an_update_download_left_over_never_recursively() {
+    // R365: the updater plugin leaves `$TEMP\LitePack-<v>-updater-<6>\LitePack-<v>-installer.exe`.
+    let nsh = include_str!("../installer.nsh");
+    let post = nsh_macro(nsh, "NSIS_HOOK_POSTUNINSTALL");
+    let lines: Vec<&str> = post.lines().map(str::trim).collect();
+    let find = r#"FindFirst $0 $1 "$TEMP\${PRODUCTNAME}-*-updater-*""#;
+    let delete = r#"Delete "$TEMP\$1\${PRODUCTNAME}-*-installer.exe""#;
+    let rmdir = r#"RMDir "$TEMP\$1""#;
+    let at = |s: &str| {
+        lines
+            .iter()
+            .position(|l| *l == s)
+            .unwrap_or_else(|| panic!("{s} not in POSTUNINSTALL"))
+    };
+    assert!(at("Push $0") < at(find));
+    assert!(at(find) < at(delete) && at(delete) < at(rmdir));
+    assert!(at(rmdir) < at("FindClose $0") && at("FindClose $0") < at("Pop $0"));
+    assert!(
+        !nsh.lines()
+            .any(|l| l.contains("RMDir /r") && l.contains("$TEMP")),
+        "never a recursive removal in the temp folder"
+    );
+}
+
+#[test]
 fn the_installer_hooks_name_this_app_and_never_remove_recursively_at_logon() {
     let nsh = include_str!("../installer.nsh");
     let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();

@@ -145,6 +145,91 @@ fn numeric(v: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
+/// R365: the version in the name of a folder the updater plugin downloads into,
+/// `{app}-{version}-updater-{suffix}` (`tempfile`'s six random ASCII letters and digits as the
+/// suffix; the version numeric, as [`numeric`] reads it). `None` for any other name: not ours.
+pub fn download_folder_version<'a>(name: &'a str, app: &str) -> Option<&'a str> {
+    let rest = name.strip_prefix(app)?.strip_prefix('-')?;
+    let at = rest.rfind("-updater-")?;
+    let (version, suffix) = (&rest[..at], &rest[at + "-updater-".len()..]);
+    let suffix_ok = suffix.len() == 6 && suffix.bytes().all(|b| b.is_ascii_alphanumeric());
+    (suffix_ok && numeric(version).is_some()).then_some(version)
+}
+
+/// Whether `meta` is a plain entry: no symbolic link, junction or other reparse point.
+fn plain(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+        const REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    !meta.file_type().is_symlink()
+}
+
+/// R365: remove one download folder of the updater plugin (`dir`, named as
+/// [`download_folder_version`] reads it): only a real folder, holding nothing but its one regular
+/// file `{app}-{version}-installer.exe` (or nothing). That file goes, then the folder,
+/// non-recursively. A folder holding anything else is left untouched, its installer too: it is
+/// not plainly the plugin's.
+pub fn remove_download(dir: &std::path::Path, app: &str) -> std::io::Result<()> {
+    let refuse = |what: &str| Err(std::io::Error::other(format!("{}: {what}", dir.display())));
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let Some(version) = download_folder_version(name, app) else {
+        return refuse("not an update download");
+    };
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || !plain(&meta) {
+        return refuse("not a plain folder");
+    }
+    let installer = format!("{app}-{version}-installer.exe");
+    for entry in std::fs::read_dir(dir)? {
+        if entry?.file_name() != installer.as_str() {
+            return refuse("holds another entry");
+        }
+    }
+    let file = dir.join(&installer);
+    match std::fs::symlink_metadata(&file) {
+        Ok(m) if m.is_file() && plain(&m) => std::fs::remove_file(&file)?,
+        Ok(_) => return refuse("its installer is not a regular file"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::remove_dir(dir)
+}
+
+/// R365: remove the updater plugin's download folders in `temp` whose version is at most
+/// `running` (a newer one may be the download this process is about to install; a non-numeric
+/// one is left). The number of such folders still there, for the caller's retries: 0 when none
+/// is left (or `temp` cannot be read). Errors are not reported.
+pub fn sweep_downloads(temp: &std::path::Path, app: &str, running: &str) -> usize {
+    let Some(running) = numeric(running) else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(temp) else {
+        return 0;
+    };
+    let mut left = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(version) = name.to_str().and_then(|n| download_folder_version(n, app)) else {
+            continue;
+        };
+        if numeric(version).is_none_or(|v| v > running) {
+            continue;
+        }
+        let path = entry.path();
+        let folder = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && plain(&m));
+        if folder && remove_download(&path, app).is_err() {
+            left += 1;
+        }
+    }
+    left
+}
+
 /// What the gate decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
@@ -426,5 +511,96 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(key, PLACEHOLDER_KEY);
         assert_eq!(gate(true, &key), Gate::NoKey);
+    }
+
+    /// A download folder `name` in `temp`, with its installer (and `extra`, if given).
+    fn download(temp: &std::path::Path, name: &str, extra: Option<&str>) -> std::path::PathBuf {
+        let dir = temp.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let version = download_folder_version(name, "LitePack").unwrap_or("x");
+        std::fs::write(dir.join(format!("LitePack-{version}-installer.exe")), b"MZ").unwrap();
+        if let Some(extra) = extra {
+            std::fs::write(dir.join(extra), b"other").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_download_folder_name_is_parsed_strictly() {
+        let v = |n: &'static str| download_folder_version(n, "LitePack");
+        assert_eq!(v("LitePack-0.0.2-updater-5EsJTL"), Some("0.0.2"));
+        assert_eq!(v("LitePack-1.10.0-updater-abc123"), Some("1.10.0"));
+        assert_eq!(v("LitePack-0.0.2-updater-5EsJT"), None);
+        assert_eq!(v("LitePack-0.0.2-updater-5EsJTLx"), None);
+        assert_eq!(v("LitePack-0.0.2-updater-5Es-TL"), None);
+        assert_eq!(v("Other-0.0.2-updater-5EsJTL"), None);
+        assert_eq!(v("LitePackX-0.0.2-updater-5EsJTL"), None);
+        assert_eq!(v("LitePack-0.0.2-beta-updater-5EsJTL"), None);
+        assert_eq!(v("LitePack--updater-5EsJTL"), None);
+    }
+
+    #[test]
+    fn the_sweep_removes_only_plain_downloads_up_to_the_running_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let t = temp.path();
+        let same = download(t, "LitePack-0.0.2-updater-5EsJTL", None);
+        let older = download(t, "LitePack-0.0.1-updater-aaaaaa", None);
+        let extra = download(t, "LitePack-0.0.1-updater-bbbbbb", Some("notes.txt"));
+        let newer = download(t, "LitePack-0.0.3-updater-cccccc", None);
+        let short = download(t, "LitePack-0.0.1-updater-ddddd", None);
+        let other = download(t, "Other-0.0.1-updater-eeeeee", None);
+        let beta = download(t, "LitePack-0.0.1-beta-updater-ffffff", None);
+        let file = t.join("LitePack-0.0.1-updater-gggggg");
+        std::fs::write(&file, b"a file").unwrap();
+        // The folder with another file counts as left; the rest are not candidates.
+        assert_eq!(sweep_downloads(t, "LitePack", "0.0.2"), 1);
+        assert!(!same.exists() && !older.exists());
+        // Left untouched, its installer too: the folder is not plainly the plugin's.
+        assert!(extra.join("LitePack-0.0.1-installer.exe").is_file());
+        assert!(extra.join("notes.txt").is_file());
+        assert!(newer.join("LitePack-0.0.3-installer.exe").is_file());
+        for d in [&short, &other, &beta] {
+            assert!(d.is_dir(), "{}", d.display());
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"a file");
+        // Once the extra file is gone, the next attempt removes the folder.
+        std::fs::remove_file(extra.join("notes.txt")).unwrap();
+        assert_eq!(sweep_downloads(t, "LitePack", "0.0.2"), 0);
+        assert!(!extra.exists() && newer.is_dir());
+        // A non-numeric running version removes nothing.
+        assert_eq!(sweep_downloads(t, "LitePack", "dev"), 0);
+        assert!(newer.is_dir());
+    }
+
+    #[test]
+    fn an_empty_download_folder_goes_and_a_file_is_never_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let empty = temp.path().join("LitePack-0.0.2-updater-5EsJTL");
+        std::fs::create_dir(&empty).unwrap();
+        remove_download(&empty, "LitePack").unwrap();
+        assert!(!empty.exists());
+        let file = temp.path().join("LitePack-0.0.2-updater-5EsJTL");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(remove_download(&file, "LitePack").is_err());
+        assert!(file.is_file());
+        // An installer that is a folder, not a regular file, stays.
+        let odd = temp.path().join("LitePack-0.0.2-updater-zzzzzz");
+        std::fs::create_dir_all(odd.join("LitePack-0.0.2-installer.exe")).unwrap();
+        assert!(remove_download(&odd, "LitePack").is_err());
+        assert!(odd.join("LitePack-0.0.2-installer.exe").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_download_folder_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("LitePack-0.0.2-installer.exe"), b"MZ").unwrap();
+        let link = temp.path().join("LitePack-0.0.2-updater-5EsJTL");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(sweep_downloads(temp.path(), "LitePack", "0.0.2"), 0);
+        assert!(remove_download(&link, "LitePack").is_err());
+        assert!(link.exists() && real.join("LitePack-0.0.2-installer.exe").is_file());
     }
 }

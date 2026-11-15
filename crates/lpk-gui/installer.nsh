@@ -457,6 +457,21 @@ FunctionEnd
     Delete "$APPDATA\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms"
     Delete "$APPDATA\Microsoft\Windows\Recent\CustomDestinations\a233dcd0c3d36a7d.customDestinations-ms"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}"
+    ; R365: an update's download, which the updater plugin leaves in the temp folder (it exits before its own clean-up)
+    ; and the GUI's next start removes; any left over goes here: in each folder named like the plugin's, its one
+    ; installer file, then the folder, non-recursively (a folder holding anything else stays; a file of that name is
+    ; neither a folder to delete in nor one to remove, so it stays too).
+    Push $0
+    Push $1
+    FindFirst $0 $1 "$TEMP\${PRODUCTNAME}-*-updater-*"
+    ${DoWhile} $1 != ""
+      Delete "$TEMP\$1\${PRODUCTNAME}-*-installer.exe"
+      RMDir "$TEMP\$1"
+      FindNext $0 $1
+    ${Loop}
+    FindClose $0
+    Pop $1
+    Pop $0
     ; A shell DLL Explorer still holds (this version's, after the template removed the rest) and set-aside executables
     ; still running (R336): removed at the next logon by one command, with the then-empty folders, never recursively.
     Delete "$INSTDIR\bin\lpk*.exe.old-*"
