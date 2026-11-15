@@ -123,6 +123,12 @@ WEBVIEW2_JUMP_LIST = "2a2e0412b8ad04a2"
 # (org.litepack.gui) is deleted by the uninstaller (installer.nsh), so it stays residue.
 SEARCH_JUMPLIST_DATA = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search\JumplistData"
 R367 = "R367, CI run 43683451272"
+# R372 (CI run 43689320509's installer job, both attempts): records Windows wrote on the runner during the job's long
+# step, while only the running lpk.exe compressed; nothing in LitePack names either key.
+R372 = "R372, CI run 43689320509"
+WIDGETS = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Dsh"
+SHELL_REFRESH = (re.escape(LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\ShellRefresh")
+                 + r"\\[0-9]+")
 CONSENT_STORE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore"
 CONSENT = ("Windows' privacy consent defaults, which its capability access manager writes the first "
            "time a desktop program asks for camera, microphone or location state; LitePack asks for "
@@ -146,6 +152,15 @@ ALLOW = [
      "reason": "Windows Search's record of the WebView2 runtime's jump list (the file above), a value "
                "named by the same AppUserModelID and written some time after the list; the runtime's, "
                "not LitePack's (" + R367 + ")"},
+    # R372.
+    {"kind": "key-only", "path": WIDGETS, "signs": "+",
+     "reason": "the Widgets board's key (Dsh), which Windows writes on its own schedule; LitePack writes nothing "
+               "under it (" + R372 + ")"},
+    {"kind": "value", "path": WIDGETS, "name": "WidgetsStateLastRun", "signs": "+~",
+     "reason": "the Widgets board's last-run time, written by Windows while the job's CLI ran (" + R372 + ")"},
+    {"kind": "key-pattern", "path": SHELL_REFRESH, "signs": "+-~",
+     "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
+               "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
     {"kind": "file", "path": r"%LOCALAPPDATA%\D3DSCache",
      "reason": "Direct3D's shader cache, which Windows' graphics runtime keeps for any program that "
                "draws with Direct3D; most likely written by WebView2's GPU process, about 120 s after "
@@ -1233,6 +1248,39 @@ class Tests(unittest.TestCase):
             self.assertIsNone(allowed("value", key, name, sign, snap()), (sign, key, name))
         # The key itself is not excused: only that one value in it.
         self.assertIsNone(allowed("key", SEARCH_JUMPLIST_DATA, None, "+", snap()))
+        # Registry names compare case-insensitively.
+        self.assertIsNotNone(allowed("value", SEARCH_JUMPLIST_DATA.lower(), "msedgewebview.ebwebview.default", "+",
+                                     snap()))
+
+    def test_r372_the_widgets_time_and_the_shell_refresh_keys(self):
+        refresh = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\ShellRefresh"
+        # CI run 43689320509's installer job, both attempts, as printed (the default value's name is empty).
+        lines = [
+            ("+", "key", WIDGETS, None),
+            ("+", "value", WIDGETS, "WidgetsStateLastRun"),
+            ("~", "value", WIDGETS, "WidgetsStateLastRun"),
+            ("-", "key", refresh + r"\2", None),
+            ("-", "value", refresh + r"\2", ""),
+            ("+", "key", refresh + r"\17", None),
+            ("~", "value", refresh + r"\17", ""),
+        ]
+        for line in lines:
+            self.assertIsNotNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
+        misses = [
+            ("-", "key", WIDGETS, None),
+            ("-", "value", WIDGETS, "WidgetsStateLastRun"),
+            ("+", "value", WIDGETS, "Other"),
+            ("+", "key", WIDGETS + r"\Sub", None),
+            ("+", "value", WIDGETS + r"\Sub", "WidgetsStateLastRun"),
+            ("+", "key", refresh, None),
+            ("+", "value", refresh, ""),
+            ("+", "key", refresh + r"\x", None),
+            ("+", "key", refresh + r"\2\Sub", None),
+            ("+", "value", refresh + r"\2\Sub", ""),
+            ("+", "key", refresh + r"X\2", None),
+        ]
+        for line in misses:
+            self.assertIsNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
 
 
 if __name__ == "__main__":
