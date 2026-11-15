@@ -7,7 +7,8 @@ The overlay is crates/lpk-gui/tauri.nsis.conf.json (the one ci.yml's `installer`
 every resource source becomes an absolute path, the five non-GUI PEs' to the files in <dir> (the build job's
 artifact, not target\\release), the notices' and licences' to the repository's own files; and `installerHooks` names
 the architecture's hooks file by its absolute path (installer.nsh for x64, installer-arm64.nsh for arm64: the hooks
-cannot see the template's ${ARCH}, installer-arm64.nsh defines it). Every other key, every destination included, is
+cannot see the template's ${ARCH}, installer-arm64.nsh defines it). Both with forward slashes: tauri-utils reads a
+resource source as a glob pattern, so no backslash reaches it. Every other key, every destination included, is
 unchanged. It fails (exit 1) on a missing source, on a resource key it does not recognise, and when the shell
 DLL's `shell/<version>/` destination is not the workspace version (Cargo.toml's `[workspace.package] version`).
 The standard library only (tomllib: Python 3.11 or later).
@@ -58,7 +59,7 @@ def overlay(arch, bin_dir, repo):
             raise OverlayError(f"missing source of {dest}: {src}")
         if dest.startswith("shell/") and dest != f"shell/{version}/{name}":
             raise OverlayError(f"{dest} is not shell/{version}/{name} (the workspace version is {version})")
-        out[str(src)] = dest
+        out[src.as_posix()] = dest
     names = sorted(k.rsplit("/", 1)[-1] for k in resources)
     if names != sorted(PES + REPO_FILES):
         raise OverlayError(f"tauri.nsis.conf.json's resources are {names}, expected {sorted(PES + REPO_FILES)}")
@@ -68,7 +69,7 @@ def overlay(arch, bin_dir, repo):
     if not hooks.is_file():
         raise OverlayError(f"missing hooks file: {hooks}")
     conf["bundle"]["resources"] = out
-    conf["bundle"]["windows"]["nsis"]["installerHooks"] = str(hooks)
+    conf["bundle"]["windows"]["nsis"]["installerHooks"] = hooks.as_posix()
     return conf
 
 
@@ -142,6 +143,8 @@ def self_test():
             check(f"{arch}: every source is absolute and exists", all(Path(s).is_absolute() and Path(s).is_file() for s in res))
             check(f"{arch}: the destinations are unchanged", sorted(res.values()) == sorted(base["bundle"]["resources"].values()))
             check(f"{arch}: the PEs come from --bin", all(Path(s).parent == bin_dir.resolve() for s, d in res.items() if d.startswith(("bin/", "shell/"))))
+            check(f"{arch}: no backslash in a source or the hooks path",
+                  not any("\\" in s for s in list(res) + [c["bundle"]["windows"]["nsis"]["installerHooks"]]))
             hooks = Path(c["bundle"]["windows"]["nsis"]["installerHooks"])
             check(f"{arch}: installerHooks is {HOOKS[arch]}", hooks.name == HOOKS[arch] and hooks.is_absolute())
             stripped = json.loads(json.dumps(c))
