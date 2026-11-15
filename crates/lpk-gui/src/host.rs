@@ -1225,6 +1225,24 @@ fn close_main_window(handle: &AppHandle) {
     );
 }
 
+/// R361, the `update-e2e` test build alone: after an outcome that left the app open, close it as
+/// a user's close does (never a kill, whose WebView2 browser process could outlive it and keep
+/// the data folder locked for the next run): the window destroyed and waited for, with its
+/// browser process, as for the installer; then the exit with 0. The window's end raises a
+/// code-less exit, held (as in the hand-off) until that wait is over.
+#[cfg(feature = "update-e2e")]
+async fn close_after_outcome(handle: &AppHandle) {
+    if let Some(host) = handle.try_state::<Host>() {
+        host.handing_off.store(true, Ordering::SeqCst);
+    }
+    let closing = handle.clone();
+    if let Err(e) = tauri::async_runtime::spawn_blocking(move || close_main_window(&closing)).await
+    {
+        eprintln!("lpk-gui: closing after the update outcome: {e}");
+    }
+    handle.exit(0);
+}
+
 /// The exit code of a portable copy whose `data` folder is unusable.
 const PORTABLE_DATA_UNUSABLE: i32 = 1;
 
@@ -1450,6 +1468,10 @@ pub fn run() -> i32 {
                                                 );
                                                 let out = install_pending(&handle).await;
                                                 update_e2e::log(&log, &format!("outcome {out:?}"));
+                                                // R361: the app is still open (nothing was
+                                                // installed): it closes as a user's close does.
+                                                update_e2e::log(&log, "closing after the outcome");
+                                                close_after_outcome(&handle).await;
                                             }
                                             None => update_e2e::log(
                                                 &log,

@@ -980,8 +980,38 @@ jobs:
         run: |
           cp "$W.bad.json" "$SRV/releases/latest/download/latest.json"
           rm -f "$STATE/update.json"
-          LPK_GUI_UPDATE_E2E="$W/bad.log" timeout 120 "$INST/lpk-gui.exe" || echo "the GUI was stopped (exit $?)"
+          # R361: no WebView2 browser process of ours (its command line names our user data folder) may
+          # outlive a clean exit by 30 s; each one is listed with how long they took to go.
+          webview2_gone() {
+            local q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+            local t0=$SECONDS left="" seen=""
+            while :; do
+              left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
+              left="${left//$'\r'/}"
+              [ -n "$left" ] || break
+              [ -n "$seen" ] || { seen=1; echo "WebView2 processes of ours $1:"; echo "$left"; }
+              if [ $((SECONDS - t0)) -ge 30 ]; then
+                echo "WebView2 processes outlived a clean exit by 30 s:"; echo "$left"; return 1
+              fi
+              sleep 1
+            done
+            if [ -n "$seen" ]; then echo "they were gone after $((SECONDS - t0)) s"; else echo "no WebView2 process of ours $1"; fi
+          }
+          # R361: the hook closes the app itself after the outcome; it is waited for, never killed.
+          LPK_GUI_UPDATE_E2E="$W/bad.log" "$INST/lpk-gui.exe" &
+          gui=$!
+          for i in $(seq 1 120); do kill -0 "$gui" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$gui" 2>/dev/null; then
+            echo "--- hook log"; cat "$W/bad.log" || true
+            kill "$gui" || true; wait "$gui" || true
+            echo "the GUI did not close after the refused update"; exit 1
+          fi
+          guirc=0; wait "$gui" || guirc=$?
+          echo "the GUI closed by itself after ${i}s, exit code $guirc"
           echo "--- hook log"; cat "$W/bad.log"; echo "--- server"; cat "$SETUP/server.log"
+          test "$guirc" = 0 || { echo "the GUI exited with $guirc after the refused update"; exit 1; }
+          grep -q "^closing after the outcome$" "$W/bad.log"
+          webview2_gone "after the GUI's exit"
           grep -q "^step check found 0.0.2$" "$W/bad.log"
           grep -q "^step download$" "$W/bad.log"
           if grep -qE "^step (verified|quit|install)$" "$W/bad.log"; then echo "the flipped payload got past verification"; exit 1; fi
@@ -1017,6 +1047,23 @@ jobs:
           n1gui="$(awk '{ sub(/^[*]/, "", $2) } $2 == "lpk-gui.exe" { print $1 }' "$SETUP/N1.sha256")"
           test -n "$n1gui" || { echo "N1.sha256 has no lpk-gui.exe:"; cat "$SETUP/N1.sha256"; exit 1; }
           state before
+          # R361: as in the negative case, no WebView2 process of ours left before N's GUI starts.
+          webview2_gone() {
+            local q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+            local t0=$SECONDS left="" seen=""
+            while :; do
+              left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
+              left="${left//$'\r'/}"
+              [ -n "$left" ] || break
+              [ -n "$seen" ] || { seen=1; echo "WebView2 processes of ours $1:"; echo "$left"; }
+              if [ $((SECONDS - t0)) -ge 30 ]; then
+                echo "WebView2 processes outlived a clean exit by 30 s:"; echo "$left"; return 1
+              fi
+              sleep 1
+            done
+            if [ -n "$seen" ]; then echo "they were gone after $((SECONDS - t0)) s"; else echo "no WebView2 process of ours $1"; fi
+          }
+          webview2_gone "before N's GUI starts"
           since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           pwsh -NoProfile -File scripts/e7-e2e-watch.ps1 -Out "$W/watch.log" -Seconds 200 &
           watch=$!
