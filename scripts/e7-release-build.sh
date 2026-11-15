@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E7-2 (release.yml's build-x64 and build-arm64 jobs): the build jobs' shared body.
-#   bash scripts/e7-release-build.sh <x64|arm64> <out dir>
+#   bash scripts/e7-release-build.sh <x64|arm64> <out dir> <version>
 # Builds the six shipped PEs through scripts/repro-build.sh (--auditable --gui, so what ships is what
 # release-checks.yml's reproducible job compares), runs scripts/check-worker-symbols.sh for x64 as ci.yml's
 # `workers` job runs it (its self-test, then the check: it links an x64 release worker with /MAP, so it has
@@ -9,14 +9,16 @@
 # <out dir>/sboms/, listed in <out dir>/sboms.sha256 (below). Nothing here signs anything (E7-2 part 2).
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-usage() { echo "usage: $0 <x64|arm64> <out dir>" >&2; exit 2; }
-[ $# -eq 2 ] || usage
+usage() { echo "usage: $0 <x64|arm64> <out dir> <version>" >&2; exit 2; }
+[ $# -eq 3 ] || usage
 case "$1" in
   x64) triple=x86_64-pc-windows-msvc ;;
   arm64) triple=aarch64-pc-windows-msvc ;;
   *) usage ;;
 esac
 out="$2"
+# The version preflight read: each SBOM's metadata.component.version must be it.
+version="$3"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
@@ -63,6 +65,14 @@ move_sboms() {
 stale="$(tree_sboms)"
 [ -z "$stale" ] || { echo "error: SBOMs already in the tree: $stale" >&2; exit 1; }
 raw="$(mktemp -d)"
+# A run stopped between cargo-cyclonedx and its move leaves no SBOM in the tree: none was there before (checked just
+# above), so every *.cdx.json in the tree on exit is one this script's runs wrote.
+cleanup() {
+  local f
+  while IFS= read -r f; do rm -f "$f"; done < <(tree_sboms)
+  rm -rf "$raw"
+}
+trap cleanup EXIT
 (cd "$root" && "${sbom[@]}")
 move_sboms "$raw/workspace"
 # tauri-cli's build (2.12.4, interface/rust.rs) runs cargo with --no-default-features and the default features (minus
@@ -83,9 +93,10 @@ move_sboms "$raw/workers"
 git -C "$root" diff --exit-code -- Cargo.lock workers/Cargo.lock ||
   { echo "error: cargo cyclonedx changed a lockfile" >&2; exit 1; }
 helper="$(cygpath -m "$root")/scripts/e7-sboms.py"
-python -I "$helper" collect --target "$triple" --out "$(cygpath -m "$out")/sboms" "$(cygpath -m "$raw")/workspace" \
-  "$(cygpath -m "$raw")/gui" "$(cygpath -m "$raw")/workers"
-rm -rf "$raw"
+# --root: the checkout, rewritten to /lpk in every string of each SBOM (repro-build.sh's --remap-path-prefix target).
+python -I "$helper" collect --target "$triple" --version "$version" --root "$(cygpath -m "$root")" \
+  --out "$(cygpath -m "$out")/sboms" "$(cygpath -m "$raw")/workspace" "$(cygpath -m "$raw")/gui" \
+  "$(cygpath -m "$raw")/workers"
 (cd "$out" && sha256sum sboms/*.cdx.json > sboms.sha256)
 n=$(wc -l < "$out/sboms.sha256")
 [ "$n" = 6 ] || { echo "error: expected 6 lines in sboms.sha256, got $n" >&2; exit 1; }

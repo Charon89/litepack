@@ -325,7 +325,7 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   credential, no OIDC). Outputs the version and the commit time.
 - `tools` (windows-2025): `cargo install --locked --root` of tauri-cli, cargo-auditable and cargo-cyclonedx at the
   versions in `scripts/release-tools.env`, uploaded with `tools.sha256`; the list's own hash is the job's output.
-- `build-x64`, `build-arm64` (windows-2025): `scripts/e7-release-build.sh <arch> <out>` runs `repro-build.sh
+- `build-x64`, `build-arm64` (windows-2025): `scripts/e7-release-build.sh <arch> <out> <version>` runs `repro-build.sh
   --auditable --gui` for the target (x64 also runs `check-worker-symbols.sh`) and writes `unsigned.sha256` for the six
   PEs. Each job checks the tools against their list and the list against `tools`' output first. Then (part 1d) it runs
   `cargo cyclonedx --describe binaries --format json --spec-version 1.5 --target <triple>` three times, with
@@ -333,12 +333,15 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   default features, for `lpk-gui` with the features tauri-cli builds it with (`--no-default-features --features
   "updater tauri/custom-protocol"`; the script stops if the GUI's default features change), and in `workers/` with its
   default features (never `faults`). cargo-cyclonedx has no `--locked`, so the script then requires `Cargo.lock` and
-  `workers/Cargo.lock` unchanged. `scripts/e7-sboms.py collect` keeps one SBOM per shipped binary as
-  `sboms/<binary>.cdx.json` (`lpk`, `lpk-check`, `lpk-worker`, `lpk-worker-libarchive`, `lpk_shell`, `lpk-gui`),
-  leaves the unshipped binaries' out by name, and fails on a missing SBOM, an extra one (of any other binary, or a
-  shipped one twice), or one that is not CycloneDX JSON of spec 1.5 whose `metadata.component` names its binary and
-  whose target-triple property is the job's. `sboms.sha256` lists the six; its hash is the job's second output
-  (`unsigned.sha256` stays the list of the six PEs that the later jobs read line by line).
+  `workers/Cargo.lock` unchanged; an EXIT trap removes any SBOM its runs left in the source tree if it stops early.
+  `scripts/e7-sboms.py collect --version <v> --root <checkout>` keeps one SBOM per shipped binary as
+  `sboms/<binary>.cdx.json` (`lpk`, `lpk-check`, `lpk-worker`, `lpk-worker-libarchive`, `lpk_shell`, `lpk-gui`), the
+  checkout rewritten to `/lpk` (see "The SBOM asset"), leaves the unshipped binaries' out by name, and fails on a
+  missing SBOM, an extra one (of any other binary, or a shipped one twice), or one that is not valid: CycloneDX JSON
+  of spec 1.5 whose `metadata.component` names its binary at version `<v>`, with a dependencies entry for it, a
+  non-empty component list (`tauri-plugin-updater` among the GUI's), the job's target-triple property, and no
+  absolute path left. `sboms.sha256` lists the six; its hash is the job's second output (`unsigned.sha256` stays the
+  list of the six PEs that the later jobs read line by line).
 - `package` (windows-2025): checks every download against its list and every list against its job's output. For each
   architecture it copies the built GUI to `target\<triple>\release\`, writes the overlay with
   `scripts/e7-nsis-overlay.py`, and runs `cargo tauri bundle --ci -v --bundles nsis --target <triple>
@@ -400,12 +403,21 @@ names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portab
 **The SBOM asset.** `litepack-<v>-sbom.zip` holds the folders `x64/` and `arm64/`, each with one CycloneDX 1.5 JSON
 SBOM per shipped binary of that architecture: `lpk.cdx.json`, `lpk-check.cdx.json`, `lpk-worker.cdx.json`,
 `lpk-worker-libarchive.cdx.json`, `lpk_shell.cdx.json` and `lpk-gui.cdx.json`, twelve in all. Each is cargo-cyclonedx's
-output unchanged (`--describe binaries`, the architecture's `--target`, the build's features and lockfiles): the
-binary as `metadata.component`, every crate it depends on for that target as a component with its version, licence
-and package URL, and the dependency graph. The zip is deterministic as the other zips are (sorted entries, the commit
+output (`--describe binaries`, the architecture's `--target`, the build's features and lockfiles) with one change:
+the checkout's path is rewritten to `/lpk`, the prefix `repro-build.sh` remaps the binaries' paths to (R394). The
+rewrite covers every string, in every spelling cargo-cyclonedx writes it: the `path+file:///<checkout>/...`
+`bom-ref`s and every `ref` and `dependsOn` naming them (so references stay consistent), and the percent-encoded,
+backslashed `download_url` inside the package URL of `lpk-proto` and `lpk-sandbox-sys`, which the `workers/` run
+reaches outside its own workspace (`file:///lpk\crates\lpk-proto`). The JSON is re-serialised with an indent of two.
+`collect` then fails if any string still holds the checkout, the cargo home, the user profile or any other Windows
+absolute path, plain or percent-encoded. Each SBOM holds the binary as `metadata.component` (its version the
+release's), every crate it depends on for that target as a component with its version, licence and package URL, and
+the dependency graph (an entry for the binary's own `bom-ref` required, and a non-empty component list; the GUI's must
+list `tauri-plugin-updater`, the marker of its updater feature). cargo-cyclonedx reads the workspace's metadata, where
+cargo merges the features of every member, so an SBOM may list a crate that only another member's features turn on:
+it lists at least what ships, never less. The zip is deterministic as the other zips are (sorted entries, the commit
 time, fixed attributes). Until part 2, the SBOMs describe the unsigned build: part 2 attests them with the signed
-artefacts (`docs/notes/e7-design.md` section 1). Each SBOM's `bom-ref`s carry the path of the checkout cargo-cyclonedx
-ran in, as it writes them.
+artefacts (`docs/notes/e7-design.md` section 1).
 
 **The ARM64 installer.** The hooks cannot see the template's `${ARCH}`, so the ARM64 overlay names
 `crates/lpk-gui/installer-arm64.nsh` as its hooks file. That file defines `LPK_INSTALLER_ARCH` as `arm64` and includes

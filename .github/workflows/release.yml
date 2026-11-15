@@ -160,12 +160,15 @@ jobs:
           sha256sum -c tools.sha256
           cygpath -w "$PWD" >> "$GITHUB_PATH"
       - name: Build the six shipped PEs and their SBOMs (scripts/e7-release-build.sh x64)
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
+          test -n "$VERSION"
           cargo tauri --version
           cargo auditable --version
           cargo cyclonedx --version
           python -I scripts/e7-sboms.py --self-test
-          bash scripts/e7-release-build.sh x64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64"
+          bash scripts/e7-release-build.sh x64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64" "$VERSION"
       - name: The hashes of unsigned.sha256 and sboms.sha256
         id: list
         run: |
@@ -213,12 +216,15 @@ jobs:
           sha256sum -c tools.sha256
           cygpath -w "$PWD" >> "$GITHUB_PATH"
       - name: Build the six shipped PEs and their SBOMs (scripts/e7-release-build.sh arm64)
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
+          test -n "$VERSION"
           cargo tauri --version
           cargo auditable --version
           cargo cyclonedx --version
           python -I scripts/e7-sboms.py --self-test
-          bash scripts/e7-release-build.sh arm64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64"
+          bash scripts/e7-release-build.sh arm64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64" "$VERSION"
       - name: The hashes of unsigned.sha256 and sboms.sha256
         id: list
         run: |
