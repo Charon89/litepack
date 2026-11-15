@@ -2,8 +2,9 @@ name: Release checks
 
 # The checks on what ships, kept out of ci.yml: release builds (thin LTO, one codegen unit) of the
 # shipped binaries take far longer than the lint and test jobs, they need no RUSTFLAGS (ci.yml sets
-# `-D warnings` for every job, which would replace the flags of .cargo/config.toml), and E7-2's
-# release workflow can be rehearsed by dispatching this one on a branch.
+# `-D warnings` for every job, which would replace the flags of .cargo/config.toml). The binaries are
+# built the way E7-2's release workflow builds them (scripts/repro-build.sh --auditable --gui, the
+# tools at the versions of scripts/release-tools.env); that workflow is rehearsed by its own dispatch.
 on:
   push:
     branches: [main]
@@ -24,8 +25,9 @@ env:
 
 jobs:
   # E8-5: the shipped binaries built twice from clean, in two directories with two cargo homes,
-  # through scripts/repro-build.sh (the flags of .cargo/config.toml plus path remapping); the
-  # SHA-256 of every binary must be equal. No cache: both builds start from nothing.
+  # through scripts/repro-build.sh (the flags of .cargo/config.toml plus path remapping), with
+  # `cargo auditable` and the GUI (E7-2); the SHA-256 of every binary the script lists (all six)
+  # must be equal. No cache: both builds start from nothing.
   reproducible:
     name: reproducible build (windows-2025)
     runs-on: windows-2025
@@ -45,18 +47,35 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
+      # Installed into the runner's cargo home, whose bin directory is on PATH, so the second build
+      # (another CARGO_HOME) finds the same two tools.
+      - name: tauri-cli and cargo-auditable (scripts/release-tools.env)
+        working-directory: first
+        run: |
+          set -euo pipefail
+          source scripts/release-tools.env
+          cargo install --locked --version "=$TAURI_CLI_VERSION" tauri-cli
+          cargo install --locked --version "=$CARGO_AUDITABLE_VERSION" cargo-auditable
+          cargo tauri --version
+          cargo auditable --version
+          python -I scripts/e7-pe-sections.py --self-test
       - name: First build
         working-directory: first
-        run: bash scripts/repro-build.sh --out "$(cygpath -u "$RUNNER_TEMP")/first"
+        run: bash scripts/repro-build.sh --auditable --gui --out "$(cygpath -u "$RUNNER_TEMP")/first"
       - name: Second build (another directory, another cargo home)
         working-directory: second-build-directory
         run: |
           export CARGO_HOME="$(cygpath -u "$RUNNER_TEMP")/cargo-home-2"
-          bash scripts/repro-build.sh --out "$(cygpath -u "$RUNNER_TEMP")/second"
+          bash scripts/repro-build.sh --auditable --gui --out "$(cygpath -u "$RUNNER_TEMP")/second"
       - name: Compare the SHA-256 of the shipped binaries
         run: |
           t="$(cygpath -u "$RUNNER_TEMP")"
           cat "$t/first/SHA256SUMS"
+          for s in first second; do
+            n=$(wc -l < "$t/$s/SHA256SUMS")
+            [ "$n" = 6 ] || { echo "error: expected 6 binaries in the $s build's SHA256SUMS, got $n" >&2; exit 1; }
+          done
+          echo "6 binaries compared"
           if diff "$t/first/SHA256SUMS" "$t/second/SHA256SUMS"; then
             echo "reproducible: every shipped binary is identical across the two builds"
           else
@@ -93,8 +112,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: arm64
-      - name: Shipped binaries (lpk, lpk-check, lpk-worker) for aarch64-pc-windows-msvc
-        run: bash scripts/repro-build.sh --target aarch64-pc-windows-msvc --out arm64
+      - name: tauri-cli and cargo-auditable (scripts/release-tools.env)
+        run: |
+          set -euo pipefail
+          source scripts/release-tools.env
+          cargo install --locked --version "=$TAURI_CLI_VERSION" tauri-cli
+          cargo install --locked --version "=$CARGO_AUDITABLE_VERSION" cargo-auditable
+          cargo tauri --version
+          cargo auditable --version
+      # The six shipped PEs (lpk, lpk-check, lpk-worker, lpk-worker-libarchive, lpk_shell.dll, lpk-gui),
+      # built as release builds them.
+      - name: Shipped binaries for aarch64-pc-windows-msvc
+        run: bash scripts/repro-build.sh --auditable --gui --target aarch64-pc-windows-msvc --out arm64
       # The broker smoke: lpk-core's foreign_worker test (the broker starting a worker through
       # lpk-sandbox-sys under LPAC) and the test worker it starts, laid out as the test expects
       # (the worker one directory above the test executable).
@@ -108,14 +137,12 @@ jobs:
           cp "$exe" arm64/broker/deps/foreign_worker.exe
           cp "target/$t/release/lpk-test-worker.exe" arm64/broker/
       # E6-1: the Explorer handler for ARM64 Explorer (the DLL must match Explorer's architecture,
-      # docs/notes/e6-design.md section 1), linted with -D warnings for this target too
-      # (`unsafe_code` denied crate-wide, `undocumented_unsafe_blocks` denied).
-      - name: Explorer handler (lpk_shell.dll) for aarch64-pc-windows-msvc
+      # docs/notes/e6-design.md section 1; built above by repro-build.sh), linted with -D warnings
+      # for this target too (`unsafe_code` denied crate-wide, `undocumented_unsafe_blocks` denied).
+      - name: Explorer handler (lpk_shell.dll) lint for aarch64-pc-windows-msvc
         run: |
           t=aarch64-pc-windows-msvc
           cargo clippy --locked --release --target "$t" -p lpk-shell --all-targets -- -D warnings
-          cargo build --locked --release --target "$t" -p lpk-shell
-          cp "target/$t/release/lpk_shell.dll" arm64/
       # BLAKE3 on the ARM64 runner, independent of lpk: b3sum, cross-built (a CI tool, not shipped).
       - name: b3sum for aarch64-pc-windows-msvc
         run: |
@@ -145,7 +172,7 @@ jobs:
       - name: The binaries are ARM64 (PE machine 0xAA64)
         working-directory: arm64
         run: |
-          for b in lpk.exe lpk-check.exe lpk-worker.exe broker/lpk-test-worker.exe b3sum.exe lpk_shell.dll; do
+          for b in lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe lpk_shell.dll lpk-gui.exe broker/lpk-test-worker.exe b3sum.exe; do
             pe=$(od -An -tu4 -j60 -N4 "$b" | tr -d ' ')
             m=$(od -An -tx2 -j$((pe + 4)) -N2 "$b" | tr -d ' ')
             echo "$b: machine 0x$m"

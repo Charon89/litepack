@@ -306,3 +306,51 @@ uninstaller from that copy so that it can remove the install folder, and only a 
 per-user uninstaller cannot schedule (it would need `MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT`, an administrator's
 right). The residue check allows exactly that (`--allow-uninstaller-copy`: a `~nsu*.tmp` folder holding one `Un.exe`
 or `Un_<letter>.exe` and nothing else); Windows' own temporary-folder cleanup removes it later.
+
+## The release workflow (E7-2, part 1)
+
+`.github/workflows/release.yml` builds what a release would ship, without the signing identity (E7-1, E7-3) and
+without publishing anything. Its permissions are `contents: read`, and it uses no deployment target, no stored
+credential, no OIDC token and no cache. Every action is pinned by its 40-hex commit SHA, with the tag in a comment.
+
+**Triggers.** A pull request or a push to `main` that touches the workflow, `scripts/repro-build.sh`,
+`scripts/release-tools.env`, `scripts/cargo-auditable.cmd`, `scripts/e7-*`, `crates/lpk-gui/installer*.nsh`,
+`crates/lpk-gui/tauri*.conf.json` or `rust-toolchain.toml`; and `workflow_dispatch`.
+
+**Jobs.**
+- `preflight` (ubuntu-24.04): `scripts/e7-preflight.py version` (Cargo.toml, `workers/Cargo.toml`,
+  `tauri.conf.json` and the overlay's `shell/<v>/` agree; it prints `releasable: no (unsigned; the updater key is a
+  placeholder)`), then `e7-preflight.py workflow` on this workflow (SHA pins, permissions, no deployment target, no
+  credential, no OIDC). Outputs the version and the commit time.
+- `tools` (windows-2025): `cargo install --locked --root` of tauri-cli and cargo-auditable at the versions in
+  `scripts/release-tools.env`, uploaded with `tools.sha256`; the list's own hash is the job's output.
+- `build-x64`, `build-arm64` (windows-2025): `scripts/e7-release-build.sh <arch> <out>` runs `repro-build.sh
+  --auditable --gui` for the target (x64 also runs `check-worker-symbols.sh`) and writes `unsigned.sha256` for the six
+  PEs. Each job checks the tools against their list and the list against `tools`' output first.
+- `package` (windows-2025): checks every download against its list and every list against its job's output. For each
+  architecture it copies the built GUI to `target\<triple>\release\`, writes the overlay with
+  `scripts/e7-nsis-overlay.py`, and runs `cargo tauri bundle --ci -v --bundles nsis --target <triple>
+  --no-binary-patching --no-sign --config <overlay>`. It fails without makensis's "Processing script file" or with a
+  warning 6000. Then 7-Zip lists and unpacks each installer, and every shipped PE inside must equal the build job's
+  (`lpk-gui.exe` exactly once): this is the `--no-binary-patching` check. It uploads `installers` with
+  `installers.sha256`.
+- `refuse-arm64-on-x64` (windows-2025): the ARM64 installer run with `/S` exits non-zero within 300 s and writes
+  nothing under `%LOCALAPPDATA%\LitePack`.
+- `install-arm64` (windows-11-arm): the ARM64 installer run with `/S` installs. Each installed PE is machine 0xAA64
+  (the COFF Machine field read with `od`, as `arm64-smoke` does: the job has no Python) and byte-equal to the build's. `bin\lpk.exe --version` runs, and `bin\lpk.exe`
+  round-trips a small folder. A silent uninstall (waited on with `e7-wait-uninstaller.sh`) leaves no install folder.
+
+**The ARM64 installer.** The hooks cannot see the template's `${ARCH}`, so the ARM64 overlay names
+`crates/lpk-gui/installer-arm64.nsh` as its hooks file. That file defines `LPK_INSTALLER_ARCH` as `arm64` and includes
+`installer.nsh`, whose own definition (`x64`) applies only when nothing is defined. The ARM64 installer refuses on
+any PC that is not ARM64. The x64 installer refuses on ARM64, as before, and on 32-bit Windows.
+
+**Unsigned, and deferred to part 2.** Every PE and both installers are unsigned. Part 2 adds signing (with
+`signtool verify`), its deployment target, attestation, the draft release and the tag trigger, the updater's
+`latest.json` signature, and the proof that the bundler downloads nothing (here it may fetch NSIS itself). The later
+steps of part 1 add the zips, `SHA256SUMS`, the notices finder, the SBOMs, and the install checks with the residue
+diff on both architectures.
+
+**A rehearsal.** Once the workflow is on `main`: `gh workflow run release.yml --ref main`, then
+`gh run list --workflow release.yml` and `gh run view <id>`. The artifacts (`unsigned-x64`, `unsigned-arm64`,
+`installers`) are kept for 7 days. They are unsigned test builds, not releases.

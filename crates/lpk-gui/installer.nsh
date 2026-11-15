@@ -14,7 +14,12 @@
 
 !include WinVer.nsh
 
-!define LPK_INSTALLER_ARCH "x64"
+; The architecture this installer refuses by. The x64 default; the ARM64 installer (E7-2) names
+; installer-arm64.nsh as its hooks file, which defines "arm64" and then includes this file (the template
+; includes the hooks before it defines ${ARCH}, and makensis gets no /D from the bundler).
+!ifndef LPK_INSTALLER_ARCH
+  !define LPK_INSTALLER_ARCH "x64"
+!endif
 !define LPK_PRODUCT "LitePack"
 !define LPK_MAIN_EXE "lpk-gui.exe"
 !define LPK_RUNONCE "Software\Microsoft\Windows\CurrentVersion\RunOnce"
@@ -43,8 +48,9 @@
   ${Loop}
 !macroend
 
-; The refusals: below build 19045, and the x64 installer on an ARM64 PC (an x64 lpk_shell.dll cannot load into ARM64
-; Explorer), and (R336) an install folder holding `%` or `!`, which the next-logon cleanup's cmd line would expand.
+; The refusals: below build 19045; the x64 installer on an ARM64 PC (an x64 lpk_shell.dll cannot load into ARM64
+; Explorer) or on 32-bit Windows; the ARM64 installer on any PC that is not ARM64 (E7-2); and (R336) an install
+; folder holding `%` or `!`, which the next-logon cleanup's cmd line would expand.
 ; Each exits with error level 1; `remove` names a folder to remove when empty (never recursively).
 !macro LPK_REFUSE remove
   !insertmacro LPK_FIND_CMD_CHAR
@@ -72,7 +78,25 @@
         RMDir "${remove}"
       !endif
       Quit
+    ${ElseIfNot} ${IsNativeAMD64}
+      MessageBox MB_ICONSTOP|MB_OK "${LPK_PRODUCT} needs 64-bit Windows." /SD IDOK
+      SetErrorLevel 1
+      !if "${remove}" != ""
+        RMDir "${remove}"
+      !endif
+      Quit
     ${EndIf}
+  !else if "${LPK_INSTALLER_ARCH}" == "arm64"
+    ${IfNot} ${IsNativeARM64}
+      MessageBox MB_ICONSTOP|MB_OK "This is the ARM64 build of ${LPK_PRODUCT}. On this PC, install the x64 build." /SD IDOK
+      SetErrorLevel 1
+      !if "${remove}" != ""
+        RMDir "${remove}"
+      !endif
+      Quit
+    ${EndIf}
+  !else
+    !error "installer.nsh knows the architectures x64 and arm64, not ${LPK_INSTALLER_ARCH}"
   !endif
 !macroend
 
