@@ -424,14 +424,19 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
     against the install's snapshot with `ci.yml`'s uninstall flags (`--allow-settings --allow-uninstaller-copy
     --run-folder <install>`; the profile not allowed). The temp folder's `ns*.tmp` folders are listed with their
     files after the install and after the uninstall (no verdict): on Windows on ARM, NSIS's plugin folder of the x86
-    installer or uninstaller (`ns<5>.tmp` holding `System.dll`) can stay in the temp folder after an install or an
-    uninstall, as NSIS cannot delete the DLL while x86 emulation still maps it; `e7-residue.py` allows that folder
-    with `System.dll` alone (R401).
+    installer or uninstaller (`ns<letter><one to four hex digits>.tmp`, `GetTempFileName`'s name, holding
+    `System.dll`) can stay in the temp folder after an install or an uninstall, as NSIS cannot delete the DLL while
+    x86 emulation still maps it; `e7-residue.py` allows that folder with `System.dll` alone (R401, R404).
+  - The Start menu's tile records (`HKCU\...\CurrentVersion\Start\TileProperties`) are listed read-only with
+    `reg query` after the portable GUI, right after the install and right before the uninstall (no verdict), to show
+    whether LitePack's record comes with the shortcut or with the running window (R403); the uninstaller deletes
+    `W~org.litepack.gui` (R401).
   - Every diff and wait records a verdict line and the job goes on, so one run prints all of them; the last step
-    fails on any.
+    fails on any. A WebView2 query that fails (`pwsh` with `$ErrorActionPreference = "Stop"`, or `tasklist` itself)
+    is a verdict too (R403).
   Their results gate nothing yet: no tag and no release exist. The allowances `e7-residue.py` makes were ruled on
-  from each runner's own records (R365, R372, R380, R388; R401 for both verify jobs' first run), never guessed. The
-  signing checks and the upgrade from a previous public release are part 2's.
+  from each runner's own records (R365, R372, R380, R388; R401 and R404 for the verify jobs' first runs), never
+  guessed. The signing checks and the upgrade from a previous public release are part 2's.
 
 **The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
 names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,

@@ -189,8 +189,9 @@ EXPLORER_STARTUP_LOG = r"%LOCALAPPDATA%\Microsoft\Windows\Explorer\ExplorerStart
 APPLICATION_VIEW = (r"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo\\[0-9]+"
                     r"\\ApplicationViewManagement\\W32:[0-9A-F]{16}")
 USER_TEMP = r"%LOCALAPPDATA%\Temp"
-# NSIS's plugin folder ($PLUGINSDIR): "ns" and five characters from GetTempFileName, e.g. nsrE5B7.tmp.
-NSIS_PLUGINS_DIR = r"ns[a-z][0-9A-Za-z]{4}\.tmp"
+# NSIS's plugin folder ($PLUGINSDIR), named by GetTempFileName: "ns", a letter, and its unique part, one to four
+# hexadecimal digits (nsrE5B7 and nsf1311 in CI run 43738180914, nsi2CA in run 43742607535; R404).
+NSIS_PLUGINS_DIR = r"ns[a-z][0-9A-F]{1,4}\.tmp"
 NSIS_PLUGINS = ("NSIS's plugin folder of the x86 installer or uninstaller, which NSIS deletes at exit but cannot "
                 "under Windows on ARM's emulation while System.dll is still mapped (R401, windows-11-arm, CI run "
                 "43738180914)")
@@ -203,9 +204,10 @@ ALLOW = [
      "reason": "the Widgets package's own registry hive logs, which Windows rewrites on its own (R401)"},
     {"kind": "file-changed", "path": EXPLORER_STARTUP_LOG,
      "reason": "Explorer's own start-up trace log (R401)"},
-    {"kind": "key-pattern", "path": APPLICATION_VIEW, "signs": "+",
+    # R404 (CI run 43742607535): removed too, when a window that existed at the baseline closes later.
+    {"kind": "key-pattern", "path": APPLICATION_VIEW, "signs": "+-",
      "reason": "Explorer's per-session record of a window it showed (a session's volatile key, cleared at "
-               "logoff) (R401)"},
+               "logoff) (R401, R404)"},
     {"kind": "dir-pattern", "path": USER_TEMP, "name": NSIS_PLUGINS_DIR, "signs": "+", "reason": NSIS_PLUGINS},
     {"kind": "file-in-dir-pattern", "path": USER_TEMP, "dir": NSIS_PLUGINS_DIR, "name": r"System\.dll",
      "signs": "+", "reason": NSIS_PLUGINS + ": its System.dll"},
@@ -1914,12 +1916,17 @@ class Tests(unittest.TestCase):
         for sign, path in misses:
             self.assertIsNone(allowed("file", path, None, sign, snap()), (sign, path))
 
-    def test_r401_explorers_window_record_is_allowed_added_only(self):
+    def test_r401_r404_explorers_window_record_is_allowed_added_or_removed(self):
         si = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo"
         key = si + r"\2\ApplicationViewManagement\W32:0000000000030378"
-        self.assertIn("R401", allowed("key", key, None, "+", snap()) or "")
-        self.assertIn("R401", allowed("value", key, "VirtualDesktop", "+", snap()) or "")
-        misses = [("-", "key", key, None), ("~", "value", key, "VirtualDesktop"),
+        gone = si + r"\2\ApplicationViewManagement\W32:0000000000080016"  # R404: CI run 43742607535
+        for sign, k in (("+", key), ("-", gone)):
+            self.assertIn("R404", allowed("key", k, None, sign, snap()) or "", sign)
+            self.assertIn("R404", allowed("value", k, "VirtualDesktop", sign, snap()) or "", sign)
+        misses = [("~", "value", key, "VirtualDesktop"), ("~", "value", gone, "VirtualDesktop"),
+                  ("-", "key", si + r"\2\Other\W32:0000000000080016", None),
+                  ("-", "value", si + r"\2\Other\W32:0000000000080016", "VirtualDesktop"),
+                  ("-", "key", gone + r"\Sub", None),
                   ("+", "key", key + r"\Sub", None),
                   ("+", "key", si + r"\2\ApplicationViewManagement\W32:00000000000303", None),
                   ("+", "key", si + r"\x\ApplicationViewManagement\W32:0000000000030378", None),
@@ -1948,6 +1955,15 @@ class Tests(unittest.TestCase):
         lines, bad = diff(self.base, snap(dict(self.base["files"], **extra), self.base["registry"]), False)
         self.assertEqual(bad, 1, lines)
         self.assertIn(r"RESIDUE: + file %LOCALAPPDATA%\Temp\nsrE5B7.tmp\nsExec.dll", "\n".join(lines))
+        # R404: one to four hex digits (nsi2CA in CI run 43742607535), any case.
+        for leaf in ("nsa1.tmp", "nsi2CA.tmp", "nsb2ca.tmp", "nsf1311.tmp", "NSRE5B7.TMP"):
+            two = {t + "\\" + leaf: {"kind": "dir"}, t + "\\" + leaf + r"\System.dll": f(12288)}
+            lines, bad = diff(self.base, snap(dict(self.base["files"], **two), self.base["registry"]), False)
+            self.assertEqual(bad, 0, (leaf, lines))
+        for leaf in ("nsiE5B71.tmp", "nsi.tmp", "nsi2CG.tmp", "ns12CA.tmp", "nsi2C-.tmp"):
+            for extra in ({t + "\\" + leaf: {"kind": "dir"}}, {t + "\\" + leaf + r"\System.dll": f(12288)}):
+                after = snap(dict(self.base["files"], **extra), self.base["registry"])
+                self.assertEqual(diff(self.base, after, False)[1], 1, (leaf, extra))
         misses = {t + r"\nsrE5B7X.tmp": {"kind": "dir"}, t + r"\abcE5B7.tmp": {"kind": "dir"},
                   t + r"\sub\nsrE5B7.tmp": {"kind": "dir"}, t + r"\nsq0001.tmp": f(),
                   t + r"\nsq0002.tmp\sub": {"kind": "dir"}, t + r"\nsq0002.tmp\sub\System.dll": f(),

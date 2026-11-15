@@ -913,9 +913,9 @@ jobs:
           # R361 (ci.yml's updater-e2e): no WebView2 browser process of ours (its command line names our user data
           # folder) may outlive a clean exit by 30 s; each one is listed with how long they took to go.
           webview2_gone() {
-            local pat="$1" q="" t0=$SECONDS left="" seen=""
+            local pat="$1" q="" out="" t0=$SECONDS left="" seen=""
             if command -v pwsh > /dev/null; then
-              q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+              q='$ErrorActionPreference = "Stop"; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
             else
               echo "no pwsh on this runner: every msedgewebview2.exe process (tasklist) is waited for"
             fi
@@ -923,7 +923,8 @@ jobs:
               if [ -n "$q" ]; then
                 left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
               else
-                left="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH | grep -i '^"msedgewebview2.exe"' || true)"
+                out="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH)" || { echo "the WebView2 process query (tasklist) failed"; return 1; }
+                left="$(grep -i '^"msedgewebview2.exe"' <<<"$out" || true)"
               fi
               left="${left//$'\r'/}"
               [ -n "$left" ] || break
@@ -944,6 +945,8 @@ jobs:
             grep -qE '"rendered":[1-9]' <<<"$report"
           done
           ls -la "$RUNF" "$RUNF/data"
+          echo "Start menu tile records:"
+          reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties" 2>&1 || true
           webview2_gone "$(cygpath -w "$RUNF")\data\WebView2" \
             || echo "portable: WebView2 processes outlived the GUI by 30 s" >> "$SNAP/verdicts"
       - name: The portable residue after the GUI (the worker profile required)
@@ -982,6 +985,8 @@ jobs:
           echo "$ARCH installer: exit code $rc"
           test "$rc" -eq 0
           ls -laR "$INST"
+          echo "Start menu tile records:"
+          reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties" 2>&1 || true
           d="$(cygpath -m "$LOCALAPPDATA")/Temp"; n=0
           for x in "$d"/ns*.tmp; do [ -d "$x" ] || continue; n=$((n + 1)); echo "NSIS folder $x:"; ls -la "$x"; done
           echo "after the install: $n ns*.tmp folders in $d"
@@ -1042,9 +1047,9 @@ jobs:
           # R361 (ci.yml's updater-e2e): no WebView2 browser process of ours (its command line names our user data
           # folder) may outlive a clean exit by 30 s; each one is listed with how long they took to go.
           webview2_gone() {
-            local pat="$1" q="" t0=$SECONDS left="" seen=""
+            local pat="$1" q="" out="" t0=$SECONDS left="" seen=""
             if command -v pwsh > /dev/null; then
-              q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+              q='$ErrorActionPreference = "Stop"; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
             else
               echo "no pwsh on this runner: every msedgewebview2.exe process (tasklist) is waited for"
             fi
@@ -1052,7 +1057,8 @@ jobs:
               if [ -n "$q" ]; then
                 left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
               else
-                left="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH | grep -i '^"msedgewebview2.exe"' || true)"
+                out="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH)" || { echo "the WebView2 process query (tasklist) failed"; return 1; }
+                left="$(grep -i '^"msedgewebview2.exe"' <<<"$out" || true)"
               fi
               left="${left//$'\r'/}"
               [ -n "$left" ] || break
@@ -1092,6 +1098,8 @@ jobs:
       # allowed)", the same flags.
       - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
         run: |
+          echo "Start menu tile records:"
+          reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties" 2>&1 || true
           "$INST/uninstall.exe" /S
           scripts/e7-wait-uninstaller.sh "$INST"
           if [ -e "$INST" ]; then ls -laR "$INST"; echo "after the uninstall: $INST left" >> "$SNAP/verdicts"; fi
@@ -1190,9 +1198,9 @@ jobs:
           # R361 (ci.yml's updater-e2e): no WebView2 browser process of ours (its command line names our user data
           # folder) may outlive a clean exit by 30 s; each one is listed with how long they took to go.
           webview2_gone() {
-            local pat="$1" q="" t0=$SECONDS left="" seen=""
+            local pat="$1" q="" out="" t0=$SECONDS left="" seen=""
             if command -v pwsh > /dev/null; then
-              q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+              q='$ErrorActionPreference = "Stop"; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
             else
               echo "no pwsh on this runner: every msedgewebview2.exe process (tasklist) is waited for"
             fi
@@ -1200,7 +1208,8 @@ jobs:
               if [ -n "$q" ]; then
                 left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
               else
-                left="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH | grep -i '^"msedgewebview2.exe"' || true)"
+                out="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH)" || { echo "the WebView2 process query (tasklist) failed"; return 1; }
+                left="$(grep -i '^"msedgewebview2.exe"' <<<"$out" || true)"
               fi
               left="${left//$'\r'/}"
               [ -n "$left" ] || break
@@ -1221,6 +1230,8 @@ jobs:
             grep -qE '"rendered":[1-9]' <<<"$report"
           done
           ls -la "$RUNF" "$RUNF/data"
+          echo "Start menu tile records:"
+          reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties" 2>&1 || true
           webview2_gone "$(cygpath -w "$RUNF")\data\WebView2" \
             || echo "portable: WebView2 processes outlived the GUI by 30 s" >> "$SNAP/verdicts"
       - name: The portable residue after the GUI (the worker profile required)
@@ -1259,6 +1270,8 @@ jobs:
           echo "$ARCH installer: exit code $rc"
           test "$rc" -eq 0
           ls -laR "$INST"
+          echo "Start menu tile records:"
+          reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties" 2>&1 || true
           d="$(cygpath -m "$LOCALAPPDATA")/Temp"; n=0
           for x in "$d"/ns*.tmp; do [ -d "$x" ] || continue; n=$((n + 1)); echo "NSIS folder $x:"; ls -la "$x"; done
           echo "after the install: $n ns*.tmp folders in $d"
@@ -1319,9 +1332,9 @@ jobs:
           # R361 (ci.yml's updater-e2e): no WebView2 browser process of ours (its command line names our user data
           # folder) may outlive a clean exit by 30 s; each one is listed with how long they took to go.
           webview2_gone() {
-            local pat="$1" q="" t0=$SECONDS left="" seen=""
+            local pat="$1" q="" out="" t0=$SECONDS left="" seen=""
             if command -v pwsh > /dev/null; then
-              q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+              q='$ErrorActionPreference = "Stop"; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*'"$pat"'*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
             else
               echo "no pwsh on this runner: every msedgewebview2.exe process (tasklist) is waited for"
             fi
@@ -1329,7 +1342,8 @@ jobs:
               if [ -n "$q" ]; then
                 left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
               else
-                left="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH | grep -i '^"msedgewebview2.exe"' || true)"
+                out="$(tasklist /FI "IMAGENAME eq msedgewebview2.exe" /FO CSV /NH)" || { echo "the WebView2 process query (tasklist) failed"; return 1; }
+                left="$(grep -i '^"msedgewebview2.exe"' <<<"$out" || true)"
               fi
               left="${left//$'\r'/}"
               [ -n "$left" ] || break
@@ -1369,6 +1383,8 @@ jobs:
       # allowed)", the same flags.
       - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
         run: |
+          echo "Start menu tile records:"
+          reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties" 2>&1 || true
           "$INST/uninstall.exe" /S
           scripts/e7-wait-uninstaller.sh "$INST"
           if [ -e "$INST" ]; then ls -laR "$INST"; echo "after the uninstall: $INST left" >> "$SNAP/verdicts"; fi

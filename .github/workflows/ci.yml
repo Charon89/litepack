@@ -983,7 +983,7 @@ jobs:
           # R361: no WebView2 browser process of ours (its command line names our user data folder) may
           # outlive a clean exit by 30 s; each one is listed with how long they took to go.
           webview2_gone() {
-            local q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+            local q='$ErrorActionPreference = "Stop"; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
             local t0=$SECONDS left="" seen=""
             while :; do
               left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
@@ -1049,7 +1049,7 @@ jobs:
           state before
           # R361: as in the negative case, no WebView2 process of ours left before N's GUI starts.
           webview2_gone() {
-            local q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+            local q='$ErrorActionPreference = "Stop"; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
             local t0=$SECONDS left="" seen=""
             while :; do
               left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
