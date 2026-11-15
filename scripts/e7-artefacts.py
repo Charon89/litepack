@@ -8,7 +8,8 @@ installers and the portable and CLI zip of each architecture (names from scripts
     python -I scripts/e7-artefacts.py --self-test [--sevenzip <7z.exe>]
 
 `notices` and `pes` first require `<dir>` to hold exactly e7-assets.py's expected names for `<v>` and SHA256SUMS,
-nothing else.
+nothing else; they then look inside the six artefacts (e7-assets.py's `artefacts`) only, not inside the SBOM zip
+(E7-2 part 1d), which holds no PE and no notices and is checked by scripts/e7-sboms.py.
 
 `notices` (E7-8 part 2, the notices finder): each artefact holds THIRD-PARTY-NOTICES, LICENSE-APACHE and LICENSE-MIT
 exactly once each, at its top folder (`LitePack/` in a zip, the root as 7-Zip lists it in an installer), byte-equal to
@@ -126,9 +127,11 @@ class Artefact:
 
 def find_artefacts(folder, version):
     """The six artefacts in `folder` as (path, arch, kind). Fails unless `folder` holds exactly e7-assets.py's expected
-    names for `version` and, optionally, SHA256SUMS."""
+    names for `version` and, optionally, SHA256SUMS. The SBOM zip is one of those names but not an artefact (it holds
+    no PE and no notices; scripts/e7-sboms.py checks it): only e7-assets.py's `artefacts` are returned."""
     try:
         names = assets.expected(version)
+        arts = assets.artefacts(version)
     except assets.AssetError as e:
         raise Fail(str(e))
     present = sorted(p.name for p in Path(folder).iterdir())
@@ -137,15 +140,17 @@ def find_artefacts(folder, version):
     if errors:
         raise Fail(f"{folder}: " + "; ".join(errors))
     out = []
-    for n in names:
+    for n in arts:
         m = INSTALLER_RE.match(n)
         if m:
             out.append((Path(folder) / n, m["arch"], "installer"))
         else:
             m = ZIP_RE.match(n)
+            if not m:
+                raise Fail(f"{n}: an artefact name that is neither an installer's nor a zip's")
             out.append((Path(folder) / n, m["arch"], m["kind"]))
     if sorted((a, k) for _, a, k in out) != sorted((a, k) for a in MACHINE for k in HOLDS):
-        raise Fail(f"the expected names do not give one artefact of each kind and architecture: {names}")
+        raise Fail(f"the expected names do not give one artefact of each kind and architecture: {arts}")
     return out
 
 
@@ -949,7 +954,11 @@ def self_test(sevenzip=None):
         for arch in MACHINE:
             (good / f"LitePack_0.1.0_{arch}-setup.exe").write_bytes(b"MZ")
         (good / "SHA256SUMS").write_bytes(b"")
-        ok("find_artefacts: the six and SHA256SUMS", finds(good) == 6)
+        ok("find_artefacts: without the SBOM zip fails", "missing: litepack-0.1.0-sbom.zip" in str(finds(good)))
+        (good / "litepack-0.1.0-sbom.zip").write_bytes(b"PK")
+        found = find_artefacts(good, "0.1.0")
+        ok("find_artefacts: the seven and SHA256SUMS give the six artefacts, not the SBOM zip", len(found) == 6
+           and all(not p.name.endswith("-sbom.zip") for p, _, _ in found))
         ok("find_artefacts: another version's names fail", "missing" in str(finds(good, "0.2.0")))
         (good / "notes.txt").write_bytes(b"x")
         ok("find_artefacts: an extra file fails", "not an expected asset: notes.txt" in str(finds(good)))

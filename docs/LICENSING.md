@@ -143,6 +143,13 @@ its hash, compares its `LICENSE.txt` with the committed copy, and checks both li
 against the `webview2-com-sys` that `Cargo.lock` resolves, so a bump with other libraries fails until the pin moves
 (`--find <version>...` lists candidates' hashes for that move).
 
+**Release tools (not shipped; E7-2).** The release build installs three tools at the pins of
+`scripts/release-tools.env`, with `cargo install --locked`: tauri-cli 2.12.4 (Apache-2.0 OR MIT), which builds the
+GUI and bundles the installers; cargo-auditable 0.7.7 (MIT OR Apache-2.0), which embeds each binary's dependency
+list; and cargo-cyclonedx 0.5.10 (Apache-2.0), which writes the SBOMs (licences as `cargo info` reports them). None of
+them, and none of their own dependencies, ships in an artefact: tauri-cli's bundler fetches NSIS, whose parts are
+covered above, and the SBOMs cargo-cyclonedx writes describe LitePack's own dependencies, not the tool's.
+
 ## Patents to review (counsel, not engineers, decide)
 This is a watch-list, not a legal opinion: engineers record what each patent is about and when counsel
 must look at it. Titles, holders and dates are from Google Patents; the expiry dates are that site's
