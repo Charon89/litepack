@@ -14,7 +14,7 @@ The GUI keeps some things on the computer:
   them);
 - the journal of interrupted writes;
 - the data folders of WebView2 (a second one is used when the first is still held by a LitePack that has just
-  ended; once made, it is kept; see below);
+  ended; the GUI removes it at a later start, once the first is free again; see below);
 - an update's installer, downloaded to your temp folder when you press **Install and restart**; the GUI removes
   it when it next starts, and uninstalling LitePack removes any left over;
 - for an entry you open from an archive, a copy in a folder of its own, which the program tries to remove when it

@@ -232,10 +232,149 @@ pub fn opened_note(
     })
 }
 
+/// What [`remove_alternate`] found at `<state>\WebView2-2` (R364).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlternateSweep {
+    /// The start's webview runs on the alternate folder itself: nothing is touched.
+    InUse,
+    /// No alternate folder.
+    Absent,
+    /// The alternate folder was removed.
+    Removed,
+    /// Something other than a plain folder (a file, a symbolic link, a junction or another reparse
+    /// point) is at that path: left as it is, never followed.
+    NotAFolder,
+}
+
+/// R364: once a start has created its webview on the primary folder (`used`), remove the
+/// alternate WebView2 folder (`<state>\WebView2-2`, `paths::WEBVIEW_ALTERNATE`, made only while the
+/// primary was held by a LitePack that had just ended) if it is there; the caller runs this in the
+/// background and best effort (an error is logged, never shown; the next start tries again).
+///
+/// Only that exact path under `state` is removed, and only when it is a plain folder: a file or a
+/// reparse point there is left alone, so the removal never follows a link out of the state folder.
+/// Inside the folder, `std::fs::remove_dir_all` does not follow links either: it removes a symbolic
+/// link or a junction it meets as the link itself, never its target (Rust's documented behaviour
+/// since 1.58.1, CVE-2022-21658; `the_alternate_folder_goes_and_a_link_inside_it_is_not_followed`
+/// checks it).
+pub fn remove_alternate(state: &Path, used: WebviewFolder) -> std::io::Result<AlternateSweep> {
+    if used != WebviewFolder::Primary {
+        return Ok(AlternateSweep::InUse);
+    }
+    let dir = state.join(crate::paths::WEBVIEW_ALTERNATE);
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AlternateSweep::Absent),
+        Err(e) => Err(e),
+        Ok(m) if !m.is_dir() || !crate::update::plain(&m) => Ok(AlternateSweep::NotAFolder),
+        Ok(_) => std::fs::remove_dir_all(&dir).map(|()| AlternateSweep::Removed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// A directory link at `link` to `target`: a symbolic link on Unix, a junction on Windows
+    /// (`mklink /J` needs no privilege, as lpk-bench's scan tests use it).
+    fn dir_link(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("spawn cmd for mklink /J");
+            assert!(made.status.success(), "mklink /J failed");
+        }
+    }
+
+    fn webview_state() -> (tempfile::TempDir, std::path::PathBuf) {
+        let state = tempfile::tempdir().unwrap();
+        let alternate = state.path().join(crate::paths::WEBVIEW_ALTERNATE);
+        (state, alternate)
+    }
+
+    #[test]
+    fn the_alternate_folder_is_removed_after_a_start_on_the_primary() {
+        let (state, alternate) = webview_state();
+        std::fs::create_dir_all(alternate.join("EBWebView").join("Default")).unwrap();
+        std::fs::write(alternate.join("EBWebView").join("Local State"), b"{}").unwrap();
+        std::fs::create_dir(state.path().join("WebView2")).unwrap();
+        std::fs::write(state.path().join("settings.json"), b"{}").unwrap();
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::Removed
+        );
+        assert!(!alternate.exists());
+        // Nothing else in the state folder is touched; a second start finds nothing to do.
+        assert!(state.path().join("WebView2").is_dir());
+        assert!(state.path().join("settings.json").is_file());
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::Absent
+        );
+    }
+
+    #[test]
+    fn nothing_is_removed_when_the_start_used_the_alternate() {
+        let (state, alternate) = webview_state();
+        std::fs::create_dir_all(alternate.join("EBWebView")).unwrap();
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Alternate).unwrap(),
+            AlternateSweep::InUse
+        );
+        assert!(alternate.join("EBWebView").is_dir());
+    }
+
+    #[test]
+    fn a_file_at_the_alternate_path_stays() {
+        let (state, alternate) = webview_state();
+        std::fs::write(&alternate, b"not a folder").unwrap();
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::NotAFolder
+        );
+        assert_eq!(std::fs::read(&alternate).unwrap(), b"not a folder");
+    }
+
+    #[test]
+    fn a_link_at_the_alternate_path_is_not_followed() {
+        let (state, alternate) = webview_state();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), b"the user's").unwrap();
+        dir_link(outside.path(), &alternate);
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::NotAFolder
+        );
+        assert!(std::fs::symlink_metadata(&alternate).is_ok());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep.txt")).unwrap(),
+            b"the user's"
+        );
+    }
+
+    #[test]
+    fn the_alternate_folder_goes_and_a_link_inside_it_is_not_followed() {
+        let (state, alternate) = webview_state();
+        std::fs::create_dir(&alternate).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), b"the user's").unwrap();
+        dir_link(outside.path(), &alternate.join("link"));
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::Removed
+        );
+        assert!(!alternate.exists());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep.txt")).unwrap(),
+            b"the user's"
+        );
+    }
 
     #[test]
     fn one_retry_note_per_start_only_after_a_retry() {
