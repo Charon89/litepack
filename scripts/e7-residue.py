@@ -138,7 +138,10 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
 # holding nothing), `file-changed` (that one file, changed only: never added or removed), `key-pattern`
 # (the keys whose whole path matches a regular expression, and their values; not their subkeys),
-# `key-pattern-only` (those keys' existence alone, not their values or subkeys; R373). Any
+# `key-pattern-only` (those keys' existence alone, not their values or subkeys; R373), `dir-pattern` (folders
+# directly in one folder whose names match one shape, a folder in the later snapshot; R401),
+# `file-in-dir-pattern` (files of one name shape directly inside such a folder, `dir` its shape, a file in the
+# later snapshot; R401). Any
 # entry may carry `signs`, the signs it may excuse ("+" added, "-" removed, "~" changed); without it,
 # every sign its kind allows. A value-pattern's name may hold `{temp}`: the user's temp folder in its
 # long form (`temp_folder()`).
@@ -177,7 +180,35 @@ CONSENT_KEYS = [CONSENT_STORE + "\\" + c + s
 CONSENT_PARENTS = ("Windows' Capability Access Manager setting up the user's consent store (the two keys alone, "
                    "empty; CI run 43718620349's portable job, R388); LitePack writes nothing under it")
 IDENTITY_CRL = r"HKCU\Software\Microsoft\IdentityCRL\Immersive\production"
+# R401 (release.yml run 43738180914's verify jobs: x64 job 132893507301, ARM64 job 132893507494).
+R401 = "R401, CI run 43738180914"
+SECURITY_MAINTENANCE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Security and Maintenance"
+HELIUM = (r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.WebExperience_cw5n1h2txyewy\SystemAppData"
+          r"\Helium")
+EXPLORER_STARTUP_LOG = r"%LOCALAPPDATA%\Microsoft\Windows\Explorer\ExplorerStartupLog.etl"
+APPLICATION_VIEW = (r"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo\\[0-9]+"
+                    r"\\ApplicationViewManagement\\W32:[0-9A-F]{16}")
+USER_TEMP = r"%LOCALAPPDATA%\Temp"
+# NSIS's plugin folder ($PLUGINSDIR): "ns" and five characters from GetTempFileName, e.g. nsrE5B7.tmp.
+NSIS_PLUGINS_DIR = r"ns[a-z][0-9A-Za-z]{4}\.tmp"
+NSIS_PLUGINS = ("NSIS's plugin folder of the x86 installer or uninstaller, which NSIS deletes at exit but cannot "
+                "under Windows on ARM's emulation while System.dll is still mapped (R401, windows-11-arm, CI run "
+                "43738180914)")
 ALLOW = [
+    # R401.
+    {"kind": "key", "path": SECURITY_MAINTENANCE,
+     "reason": "Windows' Security and Maintenance setting up its checks for a user on its own schedule; LitePack "
+               "writes nothing under it (" + R401 + ")"},
+    {"kind": "file-changed-pattern", "path": HELIUM, "name": r"(User|UserClasses)\.dat\.LOG[12]",
+     "reason": "the Widgets package's own registry hive logs, which Windows rewrites on its own (R401)"},
+    {"kind": "file-changed", "path": EXPLORER_STARTUP_LOG,
+     "reason": "Explorer's own start-up trace log (R401)"},
+    {"kind": "key-pattern", "path": APPLICATION_VIEW, "signs": "+",
+     "reason": "Explorer's per-session record of a window it showed (a session's volatile key, cleared at "
+               "logoff) (R401)"},
+    {"kind": "dir-pattern", "path": USER_TEMP, "name": NSIS_PLUGINS_DIR, "signs": "+", "reason": NSIS_PLUGINS},
+    {"kind": "file-in-dir-pattern", "path": USER_TEMP, "dir": NSIS_PLUGINS_DIR, "name": r"System\.dll",
+     "signs": "+", "reason": NSIS_PLUGINS + ": its System.dll"},
     # R365.
     {"kind": "file",
      "path": r"%APPDATA%\Microsoft\Windows\Recent\CustomDestinations"
@@ -259,10 +290,12 @@ ALLOW = [
     {"kind": "value", "path": r"HKCU\Software\Microsoft\AuthCookies\Live\Default\DIDC",
      "name": "Data", "reason": WAM + ": the Microsoft account device cookie"},
     # The hex subkey differs between runs (1a4, 1a7); the names must point at a DLL of Windows' own
-    # system folder (no backslash in the DLL's name), never at the install or run folder (R352).
+    # system folder (no backslash in the DLL's name), never at the install or run folder (R352); or a bare DLL
+    # name whose name holds neither lpk nor litepack (R401: @windows.storage.dll,-21791 on windows-11-arm).
     {"kind": "value-pattern", "key": re.escape(LOCAL_SETTINGS) + r"\\MuiCache\\[0-9a-f]+\\52C64B7E",
      "name": (r"(@%SystemRoot%\\System32\\[\w.-]+\.dll,-[0-9]+"
-              r"|C:\\Windows\\system32,@[\w.-]+\.dll,-[0-9]+)"),
+              r"|C:\\Windows\\system32,@[\w.-]+\.dll,-[0-9]+"
+              r"|@(?![\w.-]*(lpk|litepack))[\w.-]+\.dll,-[0-9]+)"),
      "reason": "Windows' cache of the display strings it loads from its own DLLs (MuiCache), "
                "filled when a program starts"},
     {"kind": "file-changed-pattern", "path": r"%LOCALAPPDATA%\Microsoft\Windows\Explorer",
@@ -652,6 +685,18 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
         if a["kind"] == "file-pattern" and kind == "file":
             folder, _, leaf = path.rpartition("\\")
             if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE):
+                return a["reason"]
+        if a["kind"] == "dir-pattern" and kind == "file":
+            folder, _, leaf = path.rpartition("\\")
+            if norm(folder) == norm(a["path"]) and re.fullmatch(a["name"], leaf, re.IGNORECASE) and \
+                    after["files"].get(path, {}).get("kind") == "dir":
+                return a["reason"]
+        if a["kind"] == "file-in-dir-pattern" and kind == "file":
+            folder, _, leaf = path.rpartition("\\")
+            parent, _, sub = folder.rpartition("\\")
+            if norm(parent) == norm(a["path"]) and re.fullmatch(a["dir"], sub, re.IGNORECASE) and \
+                    re.fullmatch(a["name"], leaf, re.IGNORECASE) and \
+                    after["files"].get(path, {}).get("kind") == "file":
                 return a["reason"]
         if a["kind"] == "file-changed" and kind == "file" and sign == "~" and \
                 norm(path) == norm(a["path"]):
@@ -1845,6 +1890,78 @@ class Tests(unittest.TestCase):
         for kind, path in (("key", STORAGE_SENSE + "X"), ("value", STORAGE_SENSE + r"X\Parameters"),
                            ("key", CURRENT_VERSION + r"\Storage")):
             self.assertIsNone(allowed(kind, path, "01", "+", snap()), path)
+
+    def test_r401_security_and_maintenance_is_allowed_and_a_sibling_is_not(self):
+        guid = "{01979C6A-42FA-414C-B8AA-EEE2C8202018}"
+        for sign in "+~-":
+            self.assertIn("R401", allowed("key", SECURITY_MAINTENANCE + r"\Checks\\" + guid + ".check.100", None,
+                                          sign, snap()) or "")
+            self.assertIn("R401", allowed("value", SECURITY_MAINTENANCE + r"\Providers\EventLog\\" + guid,
+                                          "Enabled", sign, snap()) or "")
+        for kind, path in (("key", SECURITY_MAINTENANCE + "X"), ("value", CURRENT_VERSION + r"\Security"),
+                           ("key", CURRENT_VERSION + r"\Action Center")):
+            self.assertIsNone(allowed(kind, path, "x", "+", snap()), path)
+
+    def test_r401_the_widgets_hive_logs_and_explorers_startup_log_changed_only(self):
+        for leaf in ("UserClasses.dat.LOG2", "User.dat.LOG2", "User.dat.LOG1", "userclasses.dat.log1"):
+            self.assertIn("R401", allowed("file", HELIUM + "\\" + leaf, None, "~", snap()) or "", leaf)
+        self.assertIn("R401", allowed("file", EXPLORER_STARTUP_LOG, None, "~", snap()) or "")
+        misses = [("+", HELIUM + r"\User.dat.LOG2"), ("-", HELIUM + r"\UserClasses.dat.LOG1"),
+                  ("~", HELIUM + r"\User.dat"), ("~", HELIUM + r"\User.dat.LOG3"),
+                  ("~", HELIUM + r"\Sub\User.dat.LOG1"), ("~", HELIUM.rsplit("\\", 1)[0] + r"\User.dat.LOG1"),
+                  ("+", EXPLORER_STARTUP_LOG), ("-", EXPLORER_STARTUP_LOG),
+                  ("~", EXPLORER_STARTUP_LOG + ".old")]
+        for sign, path in misses:
+            self.assertIsNone(allowed("file", path, None, sign, snap()), (sign, path))
+
+    def test_r401_explorers_window_record_is_allowed_added_only(self):
+        si = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo"
+        key = si + r"\2\ApplicationViewManagement\W32:0000000000030378"
+        self.assertIn("R401", allowed("key", key, None, "+", snap()) or "")
+        self.assertIn("R401", allowed("value", key, "VirtualDesktop", "+", snap()) or "")
+        misses = [("-", "key", key, None), ("~", "value", key, "VirtualDesktop"),
+                  ("+", "key", key + r"\Sub", None),
+                  ("+", "key", si + r"\2\ApplicationViewManagement\W32:00000000000303", None),
+                  ("+", "key", si + r"\x\ApplicationViewManagement\W32:0000000000030378", None),
+                  ("+", "value", si + r"\2\ApplicationViewManagement", "x"),
+                  ("+", "key", si + r"\2\Other\W32:0000000000030378", None)]
+        for sign, kind, path, name in misses:
+            self.assertIsNone(allowed(kind, path, name, sign, snap()), (sign, kind, path, name))
+
+    def test_r401_the_muicache_allows_a_bare_windows_dll_name_never_lpks(self):
+        key = LOCAL_SETTINGS + r"\MuiCache\1d8\52C64B7E"
+        self.assertIsNotNone(allowed("value", key, "@windows.storage.dll,-21791", "+", snap()))
+        for name in ("@lpk_shell.dll,-1", "@LPK_SHELL.DLL,-1", "@LitePack.dll,-2", "@my-litepack-x.dll,-3",
+                     "@windows.storage.dll", "@sub\\windows.storage.dll,-1", "windows.storage.dll,-1"):
+            self.assertIsNone(allowed("value", key, name, "+", snap()), name)
+
+    def test_r401_nsis_plugin_folders_with_system_dll_alone_are_allowed_added_only(self):
+        t = r"%LOCALAPPDATA%\Temp"
+        files = {t + r"\nsrE5B7.tmp": {"kind": "dir"}, t + r"\nsrE5B7.tmp\System.dll": f(12288),
+                 t + r"\nsf1311.tmp": {"kind": "dir"}, t + r"\nsf1311.tmp\System.dll": f(12288)}
+        lines, bad = diff(self.base, snap(dict(self.base["files"], **files), self.base["registry"]), False)
+        self.assertEqual(bad, 0, lines)
+        self.assertTrue(all("R401" in line for line in lines), lines)
+        # Any other file in such a folder stays residue; so does a folder of another shape or place, a file
+        # of the folder's name, and a removal.
+        extra = dict(files, **{t + r"\nsrE5B7.tmp\nsExec.dll": f()})
+        lines, bad = diff(self.base, snap(dict(self.base["files"], **extra), self.base["registry"]), False)
+        self.assertEqual(bad, 1, lines)
+        self.assertIn(r"RESIDUE: + file %LOCALAPPDATA%\Temp\nsrE5B7.tmp\nsExec.dll", "\n".join(lines))
+        misses = {t + r"\nsrE5B7X.tmp": {"kind": "dir"}, t + r"\abcE5B7.tmp": {"kind": "dir"},
+                  t + r"\sub\nsrE5B7.tmp": {"kind": "dir"}, t + r"\nsq0001.tmp": f(),
+                  t + r"\nsq0002.tmp\sub": {"kind": "dir"}, t + r"\nsq0002.tmp\sub\System.dll": f(),
+                  t + r"\nsq0003.tmp\System.dll.bak": f()}
+        for path, rec in misses.items():
+            after = snap(dict(self.base["files"], **{path: rec}), self.base["registry"])
+            self.assertEqual(diff(self.base, after, False)[1], 1, path)
+        before = snap(dict(self.base["files"], **files), self.base["registry"])
+        self.assertEqual(diff(before, self.base, False)[1], 4)
+
+    def test_r401_the_start_menus_tile_record_of_litepack_stays_residue(self):
+        key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties\W~org.litepack.gui"
+        self.assertIsNone(allowed("key", key, None, "+", snap()))
+        self.assertIsNone(allowed("value", key, "Category", "+", snap()))
 
     def test_r380_the_parser_reads_shows_format(self):
         self.assertEqual(parse_shown(r'+ value HKCU\A [@] = "x"'), ("+", "value", r"HKCU\A", "", '"x"'))

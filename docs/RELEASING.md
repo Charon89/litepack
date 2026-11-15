@@ -394,34 +394,44 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   zip of the runner's architecture, as a user gets them (`docs/notes/e7-design.md` section 1's `verify`, sections 3
   and 5). Each needs `preflight` and `assemble`, downloads `release-assets`, and checks `SHA256SUMS` against
   `assemble`'s output, then `sha256sum -c`. Python is setup-python's 3.13.7; on windows-11-arm it is the x64 build
-  (`architecture: x64`, run under Windows 11's x64 emulation, which shares the native registry view and System32),
-  because setup-python cannot install 3.13.7 for ARM64 there. The job prints `platform.machine()` and `sys.version`.
-  The steps mirror `ci.yml`'s `installer` and `portable` jobs:
-  - `e7-residue.py snapshot`; `LitePack_<v>_<arch>-setup.exe /S` (exit 0 within 300 s); the installed layout (the
-    six PEs, `uninstall.exe`, the notices and both licences, each compared with the repository's with `cmp`);
-    `e7-installer-check.py installed <install> <v>` (the Uninstall key, the user `Path`, route C, the `.lpk`
+  (`architecture: x64`), because setup-python cannot install 3.13.7 for ARM64 there. It runs under Windows 11's x64
+  emulation, where x64 programs are expected to see the native registry view and System32 (only x86 programs are
+  WOW64-redirected); CI run 43738180914 ran the residue tool so. The job prints `platform.machine()`, `sys.version`
+  and `PROCESSOR_ARCHITECTURE`. The steps mirror `ci.yml`'s `portable` and `installer` jobs, the portable part first,
+  on the fresh runner, so that nothing the install sets off in Windows lands in its diffs (R400):
+  - The portable snapshot: a snapshot (and `cmdkey /list`), the portable zip unzipped with `zipfile` into
+    `RUNNER_TEMP\portable-run`, outside the profile; its `lpk.exe` makes a `.lpk` and a `.zip`, and its GUI opens
+    both under `LPK_GUI_SMOKE_REPORT` (each report names the archive, has no problems and rendered rows). The GUI's
+    WebView2 browser processes (those whose command line names the copy's `data\WebView2`) must be gone within 30 s
+    (`ci.yml`'s `webview2_gone`, through `pwsh`; without `pwsh`, every `msedgewebview2.exe` from `tasklist`). Then a
+    diff that must show the worker's profile (`--require-worker-profile`), `lpk-worker.exe --remove-profile` and a
+    diff that allows nothing; `cmdkey /list` must name no LitePack credential after each.
+  - The install: `e7-residue.py snapshot`; `LitePack_<v>_<arch>-setup.exe /S` (exit 0 within 300 s); the installed
+    layout (the six PEs, `uninstall.exe`, the notices and both licences, each compared with the repository's with
+    `cmp`); `e7-installer-check.py installed <install> <v>` (the Uninstall key, the user `Path`, route C, the `.lpk`
     association and `GuiPath`); every installed PE at the runner's machine (`e7-pe-sections.py --machine`, 0x8664 or
     0xAA64).
   - `lpk` found through the user `Path`: `HKCU\Environment`'s `Path` read (read-only, as `e7-installer-check.py`
     reads it), its entries expanded; the first that holds `lpk.exe` must be the install's `bin\`, and its
-    `lpk --version` names the version. With it a small folder round-trips through `a` and `x`, `lpk export` writes a
-    `.zip`, and `lpk l` and `lpk x` read it through the installed `bin\lpk-worker.exe` (which makes the worker's
-    profile).
-  - The installed GUI opens the `.lpk` and the `.zip` under `LPK_GUI_SMOKE_REPORT` (each report names the archive,
-    has no problems and rendered rows); a snapshot and a diff that must show the worker's profile
-    (`--require-worker-profile --allow-settings --run-folder <install>`).
+    `lpk --version` names the version. With it a small folder round-trips through `a` and `x`, and `lpk export`
+    writes a `.zip`.
+  - The installed GUI opens the `.lpk` and the `.zip` (checked as above), its WebView2 processes (command line
+    naming `org.litepack.gui\WebView2`) must be gone within 30 s, so that the uninstall finds the data folder
+    unlocked; then a snapshot and a diff that must show the worker's profile, made by the GUI's own worker run
+    (`--require-worker-profile --allow-settings --run-folder <install>`). Only then do `lpk l` and `lpk x` read the
+    `.zip` through the installed `bin\lpk-worker.exe` (as `ci.yml`).
   - `uninstall.exe /S`, waited on with `e7-wait-uninstaller.sh`; no install folder left; a snapshot and the diff
-    against the first with `ci.yml`'s uninstall flags (`--allow-settings --allow-uninstaller-copy --run-folder
-    <install>`; the profile not allowed).
-  - The portable snapshot: a fresh snapshot (and `cmdkey /list`), the portable zip unzipped with `zipfile` into
-    `RUNNER_TEMP\portable-run`, outside the profile; its `lpk.exe` makes a `.lpk` and a `.zip`, its GUI opens both
-    (checked as above); a diff that must show the worker's profile (`--require-worker-profile`), then
-    `lpk-worker.exe --remove-profile` and a diff that allows nothing; `cmdkey /list` must name no LitePack credential
-    after each.
-  - Every diff records a verdict line and the job goes on, so one run prints all of them; the last step fails on any.
-  Their results gate nothing yet: no tag and no release exist. The allowances `e7-residue.py` makes are those of the
-  x64 runner (R365, R372, R380, R388); any record the ARM64 runner writes beyond them is printed by the first run and
-  ruled on, not guessed. The signing checks and the upgrade from a previous public release are part 2's.
+    against the install's snapshot with `ci.yml`'s uninstall flags (`--allow-settings --allow-uninstaller-copy
+    --run-folder <install>`; the profile not allowed). The temp folder's `ns*.tmp` folders are listed with their
+    files after the install and after the uninstall (no verdict): on Windows on ARM, NSIS's plugin folder of the x86
+    installer or uninstaller (`ns<5>.tmp` holding `System.dll`) can stay in the temp folder after an install or an
+    uninstall, as NSIS cannot delete the DLL while x86 emulation still maps it; `e7-residue.py` allows that folder
+    with `System.dll` alone (R401).
+  - Every diff and wait records a verdict line and the job goes on, so one run prints all of them; the last step
+    fails on any.
+  Their results gate nothing yet: no tag and no release exist. The allowances `e7-residue.py` makes were ruled on
+  from each runner's own records (R365, R372, R380, R388; R401 for both verify jobs' first run), never guessed. The
+  signing checks and the upgrade from a previous public release are part 2's.
 
 **The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
 names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,

@@ -481,6 +481,9 @@ FunctionEnd
     Delete "$APPDATA\Microsoft\Windows\Recent\AutomaticDestinations\a233dcd0c3d36a7d.automaticDestinations-ms"
     Delete "$APPDATA\Microsoft\Windows\Recent\CustomDestinations\a233dcd0c3d36a7d.customDestinations-ms"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}"
+    ; R401: Windows 11's Start menu record of the app, a key named W~<AppUserModelID> (seen in CI run 43738180914's
+    ; windows-11-arm diff, with its value Category).
+    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Start\TileProperties\W~${BUNDLEID}"
     ; R365: an update's download, which the updater plugin leaves in the temp folder (it exits before its own clean-up)
     ; and the GUI's next start removes; any left over goes here. Looser than the GUI's check (R366): in every folder
     ; whose name has the plugin's shape, the files named like its installer go, then the folder, only if that left it

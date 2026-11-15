@@ -700,6 +700,49 @@ fn the_uninstaller_removes_the_jump_list_of_this_identifier() {
 }
 
 #[test]
+fn the_uninstaller_removes_the_start_menus_tile_record_of_this_identifier() {
+    // R401: Windows 11's Start menu keeps `Start\TileProperties\W~<AppUserModelID>` (CI run 43738180914's
+    // windows-11-arm diff named `W~org.litepack.gui`). The uninstall (not an update's) deletes it with the jump
+    // list's records, by the identifier NSIS knows as BUNDLEID.
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    assert_eq!(conf["identifier"].as_str(), Some("org.litepack.gui"));
+    let post = nsh_macro(include_str!("../installer.nsh"), "NSIS_HOOK_POSTUNINSTALL");
+    let lines: Vec<&str> = post.lines().map(str::trim).collect();
+    let tile = r#"DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Start\TileProperties\W~${BUNDLEID}""#;
+    let jump = r#"DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}""#;
+    let at = |s: &str| {
+        lines
+            .iter()
+            .position(|l| *l == s)
+            .unwrap_or_else(|| panic!("{s} not in POSTUNINSTALL"))
+    };
+    // The `${If} $UpdateMode <> 1` block, its nested `${If}`s counted, holds both lines.
+    let not_update = at("${If} $UpdateMode <> 1");
+    let mut depth = 0usize;
+    let mut end = None;
+    for (i, l) in lines.iter().enumerate().skip(not_update) {
+        if l.starts_with("${If}") {
+            depth += 1;
+        } else if l.starts_with("${EndIf}") {
+            depth -= 1;
+            if depth == 0 {
+                end = Some(i);
+                break;
+            }
+        }
+    }
+    let end = end.expect("the UpdateMode block ends");
+    assert!(not_update < at(jump) && at(jump) < at(tile) && at(tile) < end);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains("TileProperties"))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn the_uninstaller_removes_an_update_download_left_over_never_recursively() {
     // R365: the updater plugin leaves `$TEMP\LitePack-<v>-updater-<6>\LitePack-<v>-installer.exe`.
     let nsh = include_str!("../installer.nsh");
