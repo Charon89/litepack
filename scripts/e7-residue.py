@@ -195,7 +195,20 @@ NSIS_PLUGINS_DIR = r"ns[a-z][0-9A-F]{1,4}\.tmp"
 NSIS_PLUGINS = ("NSIS's plugin folder of the x86 installer or uninstaller, which NSIS deletes at exit but cannot "
                 "under Windows on ARM's emulation while System.dll is still mapped (R401, windows-11-arm, CI run "
                 "43738180914)")
+# R406 (release.yml run 43746466112's verify-arm64, job 132919011093): two programs of the windows-11-arm image that
+# write on their own schedule, in folders of their own.
+CBS_WEBVIEW = r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\LocalState\EBWebView"
+FIREFOX_BACKGROUND_TASKS = r"%APPDATA%\Mozilla\Firefox\Background Tasks Profiles"
 ALLOW = [
+    # R406.
+    {"kind": "file", "path": CBS_WEBVIEW,
+     "reason": "the WebView2 data of Windows' own Start and Search client package (Client.CBS), which its "
+               "component updater fills and rewrites on its own schedule; LitePack's WebView2 data is in its own "
+               "folder (R406, CI run 43746466112)"},
+    {"kind": "file", "path": FIREFOX_BACKGROUND_TASKS,
+     "reason": "Firefox's background tasks (its default-browser agent, a scheduled task of the runner image's "
+               "Firefox), which rewrite their own profiles; LitePack writes nothing there (R406, CI run "
+               "43746466112)"},
     # R401.
     {"kind": "key", "path": SECURITY_MAINTENANCE,
      "reason": "Windows' Security and Maintenance setting up its checks for a user on its own schedule; LitePack "
@@ -1903,6 +1916,25 @@ class Tests(unittest.TestCase):
         for kind, path in (("key", SECURITY_MAINTENANCE + "X"), ("value", CURRENT_VERSION + r"\Security"),
                            ("key", CURRENT_VERSION + r"\Action Center")):
             self.assertIsNone(allowed(kind, path, "x", "+", snap()), path)
+
+    def test_r406_windows_shell_webview_data_and_firefox_background_tasks_and_their_siblings(self):
+        for sign in "+~-":
+            for path in (CBS_WEBVIEW + r"\hyphen-data\120.0.6050.0\hyph-en-us.hyb",
+                         CBS_WEBVIEW + r"\component_crx_cache\metadata.json", CBS_WEBVIEW + r"\Local State",
+                         FIREFOX_BACKGROUND_TASKS + r"\qh3smhym.MozillaBackgroundTask-308046B0AF4A39CB-defaultagent"
+                         r"\prefs.js"):
+                self.assertIn("R406", allowed("file", path, None, sign, snap()) or "", (sign, path))
+        cbs = CBS_WEBVIEW.rsplit("\\", 1)[0]
+        misses = [cbs + r"\Other\x.json", cbs + r"\EBWebViewX\x.json",
+                  CBS_WEBVIEW.replace("Client.CBS", "Client.CBSX") + r"\x.json",
+                  r"%APPDATA%\Mozilla\Firefox\Profiles\abc.default\prefs.js",
+                  FIREFOX_BACKGROUND_TASKS + "X" + r"\prefs.js",
+                  r"%LOCALAPPDATA%\org.litepack.gui\EBWebView\Local State"]
+        for path in misses:
+            self.assertIsNone(allowed("file", path, None, "+", snap()), path)
+        # A registry path under the same names is not a file: nothing excuses it.
+        self.assertIsNone(allowed("key", r"HKCU\Software\Mozilla\Firefox\Background Tasks Profiles", None, "+",
+                                  snap()))
 
     def test_r401_the_widgets_hive_logs_and_explorers_startup_log_changed_only(self):
         for leaf in ("UserClasses.dat.LOG2", "User.dat.LOG2", "User.dat.LOG1", "userclasses.dat.log1"):
