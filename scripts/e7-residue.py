@@ -174,6 +174,8 @@ CONSENT = ("Windows' privacy consent defaults, which its capability access manag
            "by it; added only, a changed or removed privacy setting stays residue (" + R365 + ")")
 CONSENT_KEYS = [CONSENT_STORE + "\\" + c + s
                 for c in ("location", "microphone", "webcam") for s in ("", r"\NonPackaged")]
+CONSENT_PARENTS = ("Windows' Capability Access Manager setting up the user's consent store (the two keys alone, "
+                   "empty; CI run 43718620349's portable job, R388); LitePack writes nothing under it")
 IDENTITY_CRL = r"HKCU\Software\Microsoft\IdentityCRL\Immersive\production"
 ALLOW = [
     # R365.
@@ -214,6 +216,9 @@ ALLOW = [
                "the GUI started (" + R365 + ")"},
     *[{"kind": "key-only", "path": k, "signs": "+", "reason": CONSENT + ": the key"}
       for k in CONSENT_KEYS],
+    # R388: the two parent keys alone (key-only: never a value or a subkey under them, never removed).
+    *[{"kind": "key-only", "path": k, "signs": "+", "reason": CONSENT_PARENTS}
+      for k in (CONSENT_STORE.rsplit("\\", 1)[0], CONSENT_STORE)],
     *[{"kind": "value", "path": k, "name": n, "signs": "+", "reason": CONSENT + ": its " + n}
       for k in CONSENT_KEYS for n in ("Value", "LastSetTime")],
     {"kind": "key-pattern",
@@ -1511,6 +1516,24 @@ class Tests(unittest.TestCase):
         with unittest.mock.patch.object(sys.modules[__name__], "temp_folder", lambda: None):
             self.assertIsNone(allowed("value", SHELL_MUICACHE, self.R365_TEMP + mui, "+", snap()))
 
+    def test_r388_the_two_empty_capability_keys_alone_are_allowed(self):
+        cap = CONSENT_STORE.rsplit("\\", 1)[0]
+        self.assertEqual(cap, r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager")
+        for key in (cap, CONSENT_STORE):
+            self.assertIn("R388", self.r365("+", "key", key) or "", key)
+        misses = [
+            ("+", "value", cap, "Value"),
+            ("+", "value", CONSENT_STORE, "Value"),
+            ("+", "value", CONSENT_STORE, ""),
+            ("~", "value", CONSENT_STORE, "LastSetTime"),
+            ("+", "key", CONSENT_STORE + r"\broadFileSystemAccess"),
+            ("+", "key", cap + r"\Other"),
+            ("-", "key", cap),
+            ("-", "key", CONSENT_STORE),
+        ]
+        for line in misses:
+            self.assertIsNone(self.r365(*line), line)
+
     def test_r367_windows_search_record_of_the_webview2_jump_list(self):
         # CI run 43683451272's one line, as printed, and the same value changed.
         for sign in "+~":
@@ -1601,7 +1624,10 @@ class Tests(unittest.TestCase):
             # Each line parsed back prints as it was printed, and each is excused by R380.
             shown = sorted(line[len("allowed: "):].partition("  -- ")[0] for line in out)
             self.assertEqual(shown, sorted(lines), fixture)
-            self.assertTrue(all(R380_RUNS in line for line in out), fixture)
+            # Each by R380, but for R388's two empty capability keys, which ALLOW's key-only entries excuse first.
+            r388 = [line for line in out if "R388" in line]
+            self.assertEqual(len(r388), 2, fixture)
+            self.assertTrue(all(R380_RUNS in line for line in out if line not in r388), fixture)
             # The reason names the package.
             for line in out:
                 if self.FB_PROGID in line.partition("  -- ")[0] and line.startswith("allowed: + key"):
@@ -1612,11 +1638,16 @@ class Tests(unittest.TestCase):
         families = (r"Microsoft\.WindowsFeedbackHub|Microsoft\.Windows\.NarratorQuickStart|"
                     r"MicrosoftCorporationII\.WindowsSubsystemForLinux|"
                     r"Microsoft\.NET\.Native\.(Framework|Runtime)\.2\.2")
+        # Every line stays residue but R388's two empty capability keys (ALLOW's key-only entries, whatever R380 does).
+        cap_keys = {rf"+ key {CONSENT_STORE.rsplit(chr(92), 1)[0]}", rf"+ key {CONSENT_STORE}"}
+        self.assertTrue(cap_keys <= set(lines))
         for prefix in ("LitePack", "litepack.", "LITEPACKX"):
             renamed = [re.sub(families, lambda m: prefix + m[0], line, flags=re.IGNORECASE) for line in lines]
-            self.assertEqual(len(self.r380_residue(renamed)), 671, prefix)
+            residue = self.r380_residue(renamed)
+            self.assertEqual(len(residue), 669, prefix)
+            self.assertEqual(set(renamed) - residue, cap_keys, prefix)
         other = [line.replace("8wekyb3d8bbwe", "0123456789abc") for line in lines]
-        self.assertEqual(len(self.r380_residue(other)), 671)
+        self.assertEqual(set(other) - self.r380_residue(other), cap_keys)
         # One family renamed to the worker's moniker: its lines stay residue, the others' do not.
         worker = [re.sub(r"Microsoft\.WindowsFeedbackHub", "LitePack.Worker", line, flags=re.IGNORECASE)
                   for line in lines]
@@ -1692,9 +1723,13 @@ class Tests(unittest.TestCase):
             rf"+ reparse {WINDOWS_APPS}\notanalias.exe",
             rf"+ key {APP_PATHS}\notanalias.exe",
         ]
-        # The parents of a record not excused are not excused either.
-        parents = [rf"+ key {cap}", rf"+ key {CONSENT_STORE}", rf"+ key {CLASSES}\.fh",
-                   rf"+ key {CLASSES}\.fh\OpenWithProgids"]
+        # The parents of a record not excused are not excused either. (R388: the two empty capability keys,
+        # CapabilityAccessManager and its ConsentStore, are allowed alone by ALLOW's key-only entries; a value
+        # or a subkey under them, as broadFileSystemAccess above, stays residue.)
+        for line in (rf"+ key {cap}", rf"+ key {CONSENT_STORE}"):
+            self.assertIn(line, lines)
+            self.assertNotIn(line, self.r380_residue(lines + extra))
+        parents = [rf"+ key {CLASSES}\.fh", rf"+ key {CLASSES}\.fh\OpenWithProgids"]
         for line in parents:
             self.assertIn(line, lines)
         wanted = set(extra) | set(parents)
