@@ -104,7 +104,8 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # shape), `file-changed-pattern` (files of one folder, names of one shape, changed only), `key-pattern-value` (one value name in keys
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
 # holding nothing), `file-changed` (that one file, changed only: never added or removed), `key-pattern`
-# (the keys whose whole path matches a regular expression, and their values; not their subkeys). Any
+# (the keys whose whole path matches a regular expression, and their values; not their subkeys),
+# `key-pattern-only` (those keys' existence alone, not their values or subkeys; R373). Any
 # entry may carry `signs`, the signs it may excuse ("+" added, "-" removed, "~" changed); without it,
 # every sign its kind allows. A value-pattern's name may hold `{temp}`: the user's temp folder in its
 # long form (`temp_folder()`).
@@ -158,7 +159,14 @@ ALLOW = [
                "under it (" + R372 + ")"},
     {"kind": "value", "path": WIDGETS, "name": "WidgetsStateLastRun", "signs": "+~",
      "reason": "the Widgets board's last-run time, written by Windows while the job's CLI ran (" + R372 + ")"},
-    {"kind": "key-pattern", "path": SHELL_REFRESH, "signs": "+-~",
+    # The numbered keys themselves (`key-pattern-only`; added or removed: a key has no content to change), and their default
+    # value alone (its name is the empty string, printed `@`); any other value under them stays residue
+    # (R373). Both assume LitePack installs no package: revisit them with the sparse package (E7-5 part 2,
+    # E6-3).
+    {"kind": "key-pattern-only", "path": SHELL_REFRESH, "signs": "+-",
+     "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
+               "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
+    {"kind": "key-pattern-value", "path": SHELL_REFRESH, "name": "", "signs": "+-~",
      "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
                "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
     {"kind": "file", "path": r"%LOCALAPPDATA%\D3DSCache",
@@ -591,6 +599,8 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
             return a["reason"]
         if a["kind"] == "key-pattern" and kind in ("key", "value") and \
                 re.fullmatch(a["path"], path, re.IGNORECASE):
+            return a["reason"]
+        if a["kind"] == "key-pattern-only" and kind == "key" and                 re.fullmatch(a["path"], path, re.IGNORECASE):
             return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
             return a["reason"]
@@ -1263,6 +1273,9 @@ class Tests(unittest.TestCase):
             ("-", "value", refresh + r"\2", ""),
             ("+", "key", refresh + r"\17", None),
             ("~", "value", refresh + r"\17", ""),
+            # R373: the default value, for each sign.
+            ("+", "value", refresh + r"\17", ""),
+            ("-", "value", refresh + r"\17", ""),
         ]
         for line in lines:
             self.assertIsNotNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
@@ -1278,6 +1291,13 @@ class Tests(unittest.TestCase):
             ("+", "key", refresh + r"\2\Sub", None),
             ("+", "value", refresh + r"\2\Sub", ""),
             ("+", "key", refresh + r"X\2", None),
+            # R373: another value name under a numbered key is residue, whatever its sign.
+            ("+", "value", refresh + r"\17", "Other"),
+            ("-", "value", refresh + r"\17", "Other"),
+            ("~", "value", refresh + r"\17", "Other"),
+            ("+", "value", refresh + r"\17", "@"),
+            # A key has no content to change: `~` on a numbered key is never excused.
+            ("~", "key", refresh + r"\17", None),
         ]
         for line in misses:
             self.assertIsNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
