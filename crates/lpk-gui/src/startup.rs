@@ -40,6 +40,78 @@ pub fn webview_retry(error: &str, spent: Duration) -> bool {
     spent < bound
 }
 
+/// How long one WebView2 folder stays in use before the next try uses the other (R362).
+pub const WEBVIEW_SWITCH_AFTER: Duration = Duration::from_secs(2);
+
+/// Which of the two WebView2 user data folders a try uses (R362, `paths::webview_dirs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebviewFolder {
+    /// `<state>\WebView2`, which every start tries first.
+    Primary,
+    /// `<state>\WebView2-2`, used while the primary is held by a LitePack that ended abruptly.
+    Alternate,
+}
+
+impl WebviewFolder {
+    /// The other folder.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Primary => Self::Alternate,
+            Self::Alternate => Self::Primary,
+        }
+    }
+
+    /// Its index in `paths::webview_dirs`.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Primary => 0,
+            Self::Alternate => 1,
+        }
+    }
+}
+
+/// One failed try of the main webview (R362): the folder it used, whether its error was "in
+/// use" ([`in_use`]), and when it ran (the time waited between tries before it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderTry {
+    pub folder: WebviewFolder,
+    pub in_use: bool,
+    pub at: Duration,
+}
+
+/// The folder of the next try after the failed `tries` (oldest first), `spent` after the first
+/// try; `None` when no try is left ([`webview_retry`]'s bound on the last error). With no try yet,
+/// the primary. While the last folder has been in use for [`WEBVIEW_SWITCH_AFTER`] (its run of
+/// consecutive "in use" tries, measured from the first), the other one, so both are used in
+/// turn while both are in use; any other error keeps the last folder.
+pub fn next_webview_folder(tries: &[FolderTry], spent: Duration) -> Option<WebviewFolder> {
+    let Some(last) = tries.last() else {
+        return Some(WebviewFolder::Primary);
+    };
+    let bound = if last.in_use {
+        WEBVIEW_IN_USE_RETRY_FOR
+    } else {
+        WEBVIEW_RETRY_FOR
+    };
+    if spent >= bound {
+        return None;
+    }
+    if !last.in_use {
+        return Some(last.folder);
+    }
+    let since = tries
+        .iter()
+        .rev()
+        .take_while(|t| t.folder == last.folder && t.in_use)
+        .last()
+        .map_or(last.at, |t| t.at);
+    if spent.saturating_sub(since) >= WEBVIEW_SWITCH_AFTER {
+        Some(last.folder.other())
+    } else {
+        Some(last.folder)
+    }
+}
+
 /// The crash note's file name in the local state folder.
 pub const CRASH_LOG: &str = "crash.log";
 /// The crash note's bound: older entries go first.
@@ -130,6 +202,27 @@ pub fn retry_note(tries: u32, first: Option<&str>) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// [`retry_note`] for a start whose main window opened (R362), naming the folder it opened with
+/// (`dir`) when that is the alternate.
+pub fn opened_note(
+    tries: u32,
+    first: Option<&str>,
+    folder: WebviewFolder,
+    dir: Option<&Path>,
+) -> Option<String> {
+    let note = retry_note(tries, first)?;
+    Some(match (folder, dir) {
+        (WebviewFolder::Alternate, Some(d)) => format!(
+            "{note}; it opened with the second WebView2 folder {}, the first still in use",
+            d.display()
+        ),
+        (WebviewFolder::Alternate, None) => {
+            format!("{note}; it opened with the second WebView2 folder, the first still in use")
+        }
+        (WebviewFolder::Primary, _) => note,
+    })
 }
 
 #[cfg(test)]
@@ -260,6 +353,130 @@ mod tests {
         );
         assert_eq!(out.unwrap_err(), "another error");
         assert_eq!(tries.get(), 26);
+    }
+
+    const MS: u64 = 500;
+
+    /// Every try in `busy` (true: "in use") on the folders `next_webview_folder` picks, 500 ms
+    /// apart; the folders used, and whether the bound ended it.
+    fn run(errors: impl Fn(WebviewFolder, Duration) -> Option<bool>) -> (Vec<WebviewFolder>, bool) {
+        let mut tries = Vec::new();
+        let mut used = Vec::new();
+        let mut spent = Duration::ZERO;
+        let mut folder = next_webview_folder(&tries, spent).unwrap();
+        loop {
+            used.push(folder);
+            let Some(busy) = errors(folder, spent) else {
+                return (used, false);
+            };
+            tries.push(FolderTry {
+                folder,
+                in_use: busy,
+                at: spent,
+            });
+            match next_webview_folder(&tries, spent) {
+                Some(f) => folder = f,
+                None => return (used, true),
+            }
+            spent += Duration::from_millis(MS);
+        }
+    }
+
+    #[test]
+    fn the_primary_folder_comes_first() {
+        assert_eq!(
+            next_webview_folder(&[], Duration::ZERO),
+            Some(WebviewFolder::Primary)
+        );
+    }
+
+    #[test]
+    fn in_use_for_1_s_stays_on_the_primary() {
+        // Busy at 0, 0.5 and 1 s, free at 1.5 s.
+        let (used, ended) = run(|_, at| (at < Duration::from_millis(1_500)).then_some(true));
+        assert!(!ended);
+        assert_eq!(used, vec![WebviewFolder::Primary; 4]);
+    }
+
+    #[test]
+    fn in_use_for_2_s_switches_to_the_alternate() {
+        let (used, ended) = run(|f, _| (f == WebviewFolder::Primary).then_some(true));
+        assert!(!ended);
+        // Tries at 0, 0.5, 1, 1.5 and 2 s on the primary, then the alternate opens.
+        let mut want = vec![WebviewFolder::Primary; 5];
+        want.push(WebviewFolder::Alternate);
+        assert_eq!(used, want);
+    }
+
+    #[test]
+    fn both_in_use_alternates_within_the_bound() {
+        let (used, ended) = run(|_, _| Some(true));
+        assert!(ended);
+        // 30 s at 500 ms: tries at 0..=30 s, 61 in all; five per folder in turn.
+        assert_eq!(used.len(), 61);
+        for (i, f) in used.iter().enumerate() {
+            let want = if (i / 5) % 2 == 0 {
+                WebviewFolder::Primary
+            } else {
+                WebviewFolder::Alternate
+            };
+            assert_eq!(*f, want, "try {i}");
+        }
+    }
+
+    #[test]
+    fn another_error_never_switches() {
+        let (used, ended) = run(|_, _| Some(false));
+        assert!(ended);
+        assert_eq!(used.len(), 21);
+        assert!(used.iter().all(|f| *f == WebviewFolder::Primary));
+        // In use, then another error on the alternate: it stays there.
+        let (used, ended) = run(|f, _| Some(f == WebviewFolder::Primary));
+        assert!(ended);
+        assert_eq!(used[..5], [WebviewFolder::Primary; 5]);
+        assert!(used[5..].iter().all(|f| *f == WebviewFolder::Alternate));
+    }
+
+    #[test]
+    fn the_bound_still_ends_it() {
+        let busy = |folder, at| FolderTry {
+            folder,
+            in_use: true,
+            at,
+        };
+        let tries = [busy(WebviewFolder::Primary, Duration::ZERO)];
+        assert_eq!(next_webview_folder(&tries, Duration::from_secs(30)), None);
+        assert!(next_webview_folder(&tries, Duration::from_millis(29_500)).is_some());
+        let other = [FolderTry {
+            folder: WebviewFolder::Alternate,
+            in_use: false,
+            at: Duration::from_secs(10),
+        }];
+        assert_eq!(next_webview_folder(&other, Duration::from_secs(10)), None);
+        assert_eq!(
+            next_webview_folder(&other, Duration::from_millis(9_500)),
+            Some(WebviewFolder::Alternate)
+        );
+    }
+
+    #[test]
+    fn the_note_names_the_alternate_folder_only() {
+        let dir = Path::new("state").join("WebView2-2");
+        assert_eq!(
+            opened_note(1, None, WebviewFolder::Alternate, Some(&dir)),
+            None
+        );
+        assert_eq!(
+            opened_note(3, Some("busy"), WebviewFolder::Primary, Some(&dir)),
+            retry_note(3, Some("busy"))
+        );
+        let note = opened_note(6, Some("busy"), WebviewFolder::Alternate, Some(&dir)).unwrap();
+        assert!(
+            note.starts_with(&retry_note(6, Some("busy")).unwrap()),
+            "{note}"
+        );
+        assert!(note.contains(&dir.display().to_string()), "{note}");
+        assert!(note.contains("second WebView2 folder"), "{note}");
     }
 
     #[test]

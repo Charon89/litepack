@@ -13,7 +13,7 @@ The GUI keeps some things on the computer:
 - the lists of recent archives and destinations, which hold their paths (the button **Clear recent lists** empties
   them);
 - the journal of interrupted writes;
-- the data folder of WebView2 (see below);
+- the data folders of WebView2 (a second one is used when the first is still held by a LitePack that ended abruptly; see below);
 - for an entry you open from an archive, a copy in a folder of its own, which the program tries to remove when it
   exits (it cannot while another program still holds the copy open) and, after an earlier run that did not exit
   cleanly, removes when it next starts;

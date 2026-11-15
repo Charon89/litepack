@@ -1527,6 +1527,11 @@ pub fn run() -> i32 {
             // R342: a fresh builder per try; the old instance's WebView2 may still hold the user
             // data folder for a moment after "Install and restart".
             let window_app: &tauri::App = a;
+            // R362: the primary folder first; the alternate beside it while the primary stays in
+            // use (a LitePack that ended abruptly can leave its WebView2 browser holding it).
+            let folders = paths::webview_dirs();
+            let folder = std::cell::Cell::new(lpk_gui::startup::WebviewFolder::Primary);
+            let mut tries: Vec<lpk_gui::startup::FolderTry> = Vec::new();
             let attempt = || {
                 let mut b = tauri::WebviewWindowBuilder::new(
                     window_app,
@@ -1537,8 +1542,8 @@ pub fn run() -> i32 {
                 .inner_size(960.0, 640.0)
                 .min_inner_size(480.0, 320.0)
                 .theme(window_theme(theme));
-                if let Some(d) = paths::webview_dir() {
-                    b = b.data_directory(d);
+                if let Some(dirs) = &folders {
+                    b = b.data_directory(dirs[folder.get().index()].clone());
                 }
                 if let Some(args) = &browser_args {
                     b = b.additional_browser_args(args);
@@ -1548,11 +1553,24 @@ pub fn run() -> i32 {
             let mut first: Option<String> = None;
             let mut failed = 0u32;
             // R358: up to 30 s while the old instance's WebView2 still holds the folder
-            // ("in use"), 10 s for any other error.
+            // ("in use"), 10 s for any other error; R362: the other folder after 2 s in use.
             let made = lpk_gui::startup::retry(
                 lpk_gui::startup::WEBVIEW_RETRY_INTERVAL,
                 attempt,
-                |e, spent| lpk_gui::startup::webview_retry(&e.to_string(), spent),
+                |e, spent| {
+                    tries.push(lpk_gui::startup::FolderTry {
+                        folder: folder.get(),
+                        in_use: lpk_gui::startup::in_use(&e.to_string()),
+                        at: spent,
+                    });
+                    match lpk_gui::startup::next_webview_folder(&tries, spent) {
+                        Some(next) => {
+                            folder.set(next);
+                            true
+                        }
+                        None => false,
+                    }
+                },
                 |n, e| {
                     let line = format!("the main window, try {n}: {e}");
                     eprintln!("lpk-gui: {line}");
@@ -1567,7 +1585,11 @@ pub fn run() -> i32 {
             // fails carries the tries in its start-failed note.
             match made {
                 Ok(_) => {
-                    if let Some(note) = lpk_gui::startup::retry_note(failed + 1, first.as_deref()) {
+                    let used = folder.get();
+                    let dir = folders.as_ref().map(|d| d[used.index()].as_path());
+                    if let Some(note) =
+                        lpk_gui::startup::opened_note(failed + 1, first.as_deref(), used, dir)
+                    {
                         if let Some(dir) = paths::state_dir() {
                             lpk_gui::startup::append_crash_note(&dir, &note);
                         }
