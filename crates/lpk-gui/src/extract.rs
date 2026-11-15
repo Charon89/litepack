@@ -196,7 +196,7 @@ pub struct ExtractResult {
     /// The Mark of the Web could not be written on some file.
     pub motw_unmarked: bool,
     /// Folders this extraction created whose times or attributes could not be set (E2-19,
-    /// `lpk_core::ExtractSummary::dirs_unset`): they keep the ones they had when created. The
+    /// `lpk_api::ExtractSummary::dirs_unset`): they keep the ones they had when created. The
     /// extraction itself succeeded; 0 for a foreign archive (its reader does not count them).
     pub dirs_unset: u64,
     /// How the data was checked; none unless a file was written (a cancelled run claims nothing).
