@@ -39,6 +39,9 @@
     "allow-history-browse",
     "allow-rollback-run",
     "allow-append-plan",
-    "allow-append-run"
+    "allow-append-run",
+    "allow-update-install",
+    "allow-update-skip",
+    "allow-open-release-page"
   ]
 }

@@ -228,7 +228,24 @@ impl Options {
         let exe = std::env::current_exe().map_err(|e| WorkerError::Spawn {
             message: format!("cannot locate the host executable: {e}"),
         })?;
-        Ok(exe.with_file_name(name))
+        Ok(default_worker_path(&exe, name))
+    }
+}
+
+/// The installed layout's folder of the tools and workers (E7-5, `docs/notes/e7-design.md`
+/// section 3): `lpk-gui.exe` sits at the installation's root, its workers in `bin\`.
+pub const INSTALLED_BIN_DIR: &str = "bin";
+
+/// Where a host at `host` starts the worker `name` when [`Options`] names none (R307): from
+/// `bin\` beside the host when `bin\lpk-worker.exe` exists there (the installed layout), otherwise
+/// from beside the host (a portable copy, a development build, `lpk.exe` inside `bin\`). The same
+/// rule for both workers, decided by the Rust worker's presence.
+pub fn default_worker_path(host: &Path, name: &str) -> PathBuf {
+    let bin = host.with_file_name(INSTALLED_BIN_DIR);
+    if bin.join(WORKER_NAME).is_file() {
+        bin.join(name)
+    } else {
+        host.with_file_name(name)
     }
 }
 

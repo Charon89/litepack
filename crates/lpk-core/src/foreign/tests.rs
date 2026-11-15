@@ -1015,3 +1015,33 @@ fn the_declared_output_limit_applies_before_the_cap_and_any_data() {
         "{r:?}"
     );
 }
+
+#[test]
+fn workers_start_from_bin_in_the_installed_layout_and_beside_the_host_otherwise() {
+    let root = tempfile::tempdir().unwrap();
+    let host = root.path().join("lpk-gui.exe");
+    std::fs::write(&host, b"").unwrap();
+    // Development or portable: beside the host, both workers.
+    for name in [WORKER_NAME, WORKER_LIBARCHIVE_NAME] {
+        assert_eq!(default_worker_path(&host, name), root.path().join(name));
+    }
+    // A `bin` folder without the Rust worker is not the installed layout.
+    let bin = root.path().join(INSTALLED_BIN_DIR);
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join(WORKER_LIBARCHIVE_NAME), b"").unwrap();
+    assert_eq!(
+        default_worker_path(&host, WORKER_LIBARCHIVE_NAME),
+        root.path().join(WORKER_LIBARCHIVE_NAME)
+    );
+    // Installed: `bin\lpk-worker.exe` exists, both workers come from `bin`.
+    std::fs::write(bin.join(WORKER_NAME), b"").unwrap();
+    for name in [WORKER_NAME, WORKER_LIBARCHIVE_NAME] {
+        assert_eq!(default_worker_path(&host, name), bin.join(name));
+    }
+    // `lpk.exe` inside `bin` keeps the workers beside itself.
+    let cli = bin.join("lpk.exe");
+    assert_eq!(
+        default_worker_path(&cli, WORKER_NAME),
+        bin.join(WORKER_NAME)
+    );
+}
