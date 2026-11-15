@@ -103,10 +103,87 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # `value-pattern` (one key, or with a `key` regular expression the keys it matches, value names of one
 # shape), `file-changed-pattern` (files of one folder, names of one shape, changed only), `key-pattern-value` (one value name in keys
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
-# holding nothing), `file-changed` (that one file, changed only: never added or removed).
+# holding nothing), `file-changed` (that one file, changed only: never added or removed), `key-pattern`
+# (the keys whose whole path matches a regular expression, and their values; not their subkeys). Any
+# entry may carry `signs`, the signs it may excuse ("+" added, "-" removed, "~" changed); without it,
+# every sign its kind allows. A value-pattern's name may hold `{temp}`: the user's temp folder in its
+# long form (`temp_folder()`).
 USRCLASS = ("the storage files of HKCU\\Software\\Classes (its registry hive and transaction logs), which Windows "
             "rewrites whenever that hive is written; the diff already examines its keys one by one (R339)")
+# R365 (CI run 43676006117): the first residue-checked GUI that ran long enough (the GUI the update
+# restarted) to reach the WebView2 runtime's deferred start-up work.
+R365 = "R365, CI run 43676006117"
+# Windows names a jump list file by the CRC-64 of the upper-cased UTF-16LE AppUserModelID
+# (register_tests.rs). Chromium's AUMID for the WebView2 browser (model ID MSEdgeWebView) plus the
+# profile id it builds from the folder names EBWebView\Default: the same for every WebView2 app with
+# that layout, so the runtime's, not LitePack's (whose own jump list the uninstaller removes).
+WEBVIEW2_AUMID = "MSEDGEWEBVIEW.EBWEBVIEW.DEFAULT"
+WEBVIEW2_JUMP_LIST = "2a2e0412b8ad04a2"
+# Windows Search's record of each jump list's last update, one value per AppUserModelID; LitePack's own
+# (org.litepack.gui) is deleted by the uninstaller (installer.nsh), so it stays residue.
+SEARCH_JUMPLIST_DATA = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search\JumplistData"
+R367 = "R367, CI run 43683451272"
+# R372 (CI run 43689320509's installer job, both attempts): records Windows wrote on the runner during the job's long
+# step, while only the running lpk.exe compressed; nothing in LitePack names either key.
+R372 = "R372, CI run 43689320509"
+WIDGETS = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Dsh"
+SHELL_REFRESH = (re.escape(LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\ShellRefresh")
+                 + r"\\[0-9]+")
+CONSENT_STORE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore"
+CONSENT = ("Windows' privacy consent defaults, which its capability access manager writes the first "
+           "time a desktop program asks for camera, microphone or location state; LitePack asks for "
+           "none (no getUserMedia, mediaDevices, geolocation, enumerateDevices or PermissionRequested "
+           "in apps/ or crates/); written 3 s after the restarted GUI's WebView2 started, most likely "
+           "by it; added only, a changed or removed privacy setting stays residue (" + R365 + ")")
+CONSENT_KEYS = [CONSENT_STORE + "\\" + c + s
+                for c in ("location", "microphone", "webcam") for s in ("", r"\NonPackaged")]
+IDENTITY_CRL = r"HKCU\Software\Microsoft\IdentityCRL\Immersive\production"
 ALLOW = [
+    # R365.
+    {"kind": "file",
+     "path": r"%APPDATA%\Microsoft\Windows\Recent\CustomDestinations"
+             "\\" + WEBVIEW2_JUMP_LIST + ".customDestinations-ms",
+     "signs": "+~",
+     "reason": "the WebView2 runtime's jump list, named by the CRC-64 of its AppUserModelID "
+               + WEBVIEW2_AUMID + ", the same for every WebView2 app with the folders EBWebView\\Default; "
+               "the runtime's, not LitePack's (" + R365 + ")"},
+    {"kind": "value", "path": SEARCH_JUMPLIST_DATA, "name": "MSEdgeWebView.EBWebView.Default",
+     "signs": "+~",
+     "reason": "Windows Search's record of the WebView2 runtime's jump list (the file above), a value "
+               "named by the same AppUserModelID and written some time after the list; the runtime's, "
+               "not LitePack's (" + R367 + ")"},
+    # R372.
+    {"kind": "key-only", "path": WIDGETS, "signs": "+",
+     "reason": "the Widgets board's key (Dsh), which Windows writes on its own schedule; LitePack writes nothing "
+               "under it (" + R372 + ")"},
+    {"kind": "value", "path": WIDGETS, "name": "WidgetsStateLastRun", "signs": "+~",
+     "reason": "the Widgets board's last-run time, written by Windows while the job's CLI ran (" + R372 + ")"},
+    {"kind": "key-pattern", "path": SHELL_REFRESH, "signs": "+-~",
+     "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
+               "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
+    {"kind": "file", "path": r"%LOCALAPPDATA%\D3DSCache",
+     "reason": "Direct3D's shader cache, which Windows' graphics runtime keeps for any program that "
+               "draws with Direct3D; most likely written by WebView2's GPU process, about 120 s after "
+               "the GUI started (" + R365 + ")"},
+    *[{"kind": "key-only", "path": k, "signs": "+", "reason": CONSENT + ": the key"}
+      for k in CONSENT_KEYS],
+    *[{"kind": "value", "path": k, "name": n, "signs": "+", "reason": CONSENT + ": its " + n}
+      for k in CONSENT_KEYS for n in ("Value", "LastSetTime")],
+    {"kind": "key-pattern",
+     "path": re.escape(IDENTITY_CRL) + r"\\Token\\\{[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}\}",
+     "reason": WAM + ": the Microsoft account device ticket, the registry side of its token cache "
+                     "(" + R365 + ")"},
+    {"kind": "value-pattern", "path": IDENTITY_CRL + r"\Property", "name": r"[0-9A-F]{16}",
+     "reason": WAM + ": the device's property, named by its device id (" + R365 + ")"},
+    {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\PowerShell\StartupProfileData-NonInteractive",
+     "reason": "PowerShell's startup profile, rewritten by the CI job's own pwsh calls after the first "
+               "snapshot; LitePack runs no PowerShell (" + R365 + ")"},
+    {"kind": "value-pattern", "path": SHELL_MUICACHE,
+     "name": (r"{temp}\\LitePack-[0-9]+(\.[0-9]+)*-updater-[A-Za-z0-9]{6}"
+              r"\\LitePack-[0-9]+(\.[0-9]+)*-installer\.exe\.(ApplicationCompany|FriendlyAppName)"),
+     "reason": MUI + ": the update's installer, written by the shell when the updater plugin's "
+                     "ShellExecuteW started it from the temp folder (" + R365 + ")"},
+
     # CI run 42933006998's portable job, ruling R339.
     {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat", "reason": USRCLASS},
     {"kind": "file-changed", "path": r"%LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat.LOG1", "reason": USRCLASS},
@@ -464,12 +541,24 @@ def run_pattern(run):
     return re.escape(str(run).replace("/", "\\").rstrip("\\"))
 
 
+def temp_folder():
+    """The user's temp folder in its long form (R365: Windows' MuiCache names the update's installer
+    under the profile folder's long name, while the process ran from its short 8.3 form); None if
+    unknown."""
+    try:
+        return os.path.realpath(tempfile.gettempdir())
+    except OSError:
+        return None
+
+
 def allowed(kind, path, name, sign, after, run=None, unreadable=False):
     """The allow-list's reason for an entry, or None. Nothing excuses a path that either snapshot
     could not read."""
     if unreadable:
         return None
     for a in ALLOW:
+        if "signs" in a and sign not in a["signs"]:
+            continue
         if a["kind"] == "file" and kind == "file" and under(path, a["path"]):
             return a["reason"]
         if a["kind"] == "key" and kind in ("key", "value") and under(path, a["path"]):
@@ -485,7 +574,8 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
                 re.fullmatch(a["key"], path, re.IGNORECASE) if "key" in a
                 else norm(path) == norm(a["path"])):
             pattern = a["name"]
-            for token, folder in (("{run}", run), ("{run13}", rot13(run) if run else None)):
+            for token, folder in (("{run}", run), ("{run13}", rot13(run) if run else None),
+                                  ("{temp}", temp_folder() if "{temp}" in pattern else None)):
                 if token in pattern:
                     escaped = run_pattern(folder)
                     if escaped is None:
@@ -498,6 +588,9 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
                 return a["reason"]
         if a["kind"] == "key-pattern-value" and kind == "value" and \
                 re.fullmatch(a["path"], path, re.IGNORECASE) and norm(name) == norm(a["name"]):
+            return a["reason"]
+        if a["kind"] == "key-pattern" and kind in ("key", "value") and \
+                re.fullmatch(a["path"], path, re.IGNORECASE):
             return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
             return a["reason"]
@@ -1047,6 +1140,147 @@ class Tests(unittest.TestCase):
     def test_a_snapshot_round_trips_through_json(self):
         s = with_profile(self.base)
         self.assertEqual(diff(s, json.loads(json.dumps(s)), False), ([], 0))
+
+    # R365: CI run 43676006117's 26 lines, as (sign, kind, path, value name).
+    R365_TEMP = r"C:\Users\runneradmin\AppData\Local\Temp"
+    R365_JUMP = (r"%APPDATA%\Microsoft\Windows\Recent\CustomDestinations"
+                 r"\2a2e0412b8ad04a2.customDestinations-ms")
+    R365_PS = r"%LOCALAPPDATA%\Microsoft\PowerShell\StartupProfileData-NonInteractive"
+    R365_TOKEN = IDENTITY_CRL + r"\Token\{67082621-8D18-4333-9C64-10DE93676363}"
+    R365_DOWNLOAD = r"%LOCALAPPDATA%\Temp\LitePack-0.0.2-updater-5EsJTL"
+
+    def r365(self, sign, kind, path, name=None):
+        with unittest.mock.patch.object(sys.modules[__name__], "temp_folder", lambda: self.R365_TEMP):
+            return allowed(kind, path, name, sign, snap())
+
+    def test_r365_the_webview2_jump_list_is_the_crc_of_its_app_id(self):
+        def crc64(data):
+            c = (1 << 64) - 1
+            for b in data:
+                c ^= b
+                for _ in range(8):
+                    c = (c >> 1) ^ 0x92C64265D32139A4 if c & 1 else c >> 1
+            return c
+        self.assertEqual(f"{crc64('MICROSOFT.WINDOWS.EXPLORER'.encode('utf-16-le')):016x}",
+                         "f01b4d95cf55d32a")
+        self.assertEqual(f"{crc64(WEBVIEW2_AUMID.upper().encode('utf-16-le')):016x}",
+                         WEBVIEW2_JUMP_LIST)
+
+    def test_r365_the_runs_windows_and_webview2_lines_are_allowed(self):
+        mui = self.R365_TEMP + (r"\LitePack-0.0.2-updater-5EsJTL\LitePack-0.0.2-installer.exe"
+                                ".FriendlyAppName")
+        lines = [
+            ("+", "file", self.R365_JUMP),
+            ("+", "file", r"%LOCALAPPDATA%\D3DSCache\af4dc2d2daeb611a"),
+            ("+", "file", r"%LOCALAPPDATA%\D3DSCache\af4dc2d2daeb611a"
+                          r"\F4EB2D6C-ED2B-4BDD-AD9D-F913287E6768.dxcache"),
+            ("~", "file", self.R365_PS),
+            ("+", "key", self.R365_TOKEN),
+            ("+", "key", CONSENT_STORE + r"\location"),
+            ("+", "key", CONSENT_STORE + r"\location\NonPackaged"),
+            ("+", "key", CONSENT_STORE + r"\microphone\NonPackaged"),
+            ("+", "key", CONSENT_STORE + r"\webcam\NonPackaged"),
+            ("+", "value", SHELL_MUICACHE, mui),
+            ("~", "value", IDENTITY_CRL + r"\Property", "0018801AC06FBBF3"),
+            ("+", "value", self.R365_TOKEN, "ApplicationFlags"),
+            ("+", "value", self.R365_TOKEN, "DeviceId"),
+            ("+", "value", self.R365_TOKEN, "DeviceTicket"),
+        ] + [("+", "value", CONSENT_STORE + "\\" + k, n)
+             for k in (r"location\NonPackaged", "microphone", r"microphone\NonPackaged", "webcam",
+                       r"webcam\NonPackaged")
+             for n in ("LastSetTime", "Value")]
+        self.assertEqual(len(lines), 24)
+        for line in lines:
+            self.assertIsNotNone(self.r365(*line), line)
+        # The other two are LitePack's own download, which the product removes: still residue.
+        self.assertIsNone(self.r365("+", "file", self.R365_DOWNLOAD))
+        self.assertIsNone(self.r365("+", "file", self.R365_DOWNLOAD + r"\LitePack-0.0.2-installer.exe"))
+
+    def test_r365_near_misses_stay_residue(self):
+        custom = r"%APPDATA%\Microsoft\Windows\Recent\CustomDestinations"
+        mui = r"\LitePack-0.0.2-updater-5EsJTL\LitePack-0.0.2-installer.exe.FriendlyAppName"
+        misses = [
+            ("+", "file", custom + r"\a233dcd0c3d36a7d.customDestinations-ms"),
+            ("-", "file", self.R365_JUMP),
+            ("+", "file", r"%LOCALAPPDATA%\D3DSCacheX\a"),
+            ("~", "value", CONSENT_STORE + r"\location\NonPackaged", "Value"),
+            ("-", "value", CONSENT_STORE + r"\webcam", "Value"),
+            ("-", "key", CONSENT_STORE + r"\webcam\NonPackaged"),
+            ("+", "value", CONSENT_STORE + r"\location\NonPackaged", "Other"),
+            ("+", "value", CONSENT_STORE + r"\contacts", "Value"),
+            ("+", "value", CONSENT_STORE + r"\contacts\NonPackaged", "LastSetTime"),
+            ("+", "key", CONSENT_STORE + r"\webcam\NonPackaged\app"),
+            ("~", "value", IDENTITY_CRL + r"\Property", "0018801AC06FBBF"),
+            ("~", "value", IDENTITY_CRL + r"\Property", "DeviceId"),
+            ("+", "key", self.R365_TOKEN + r"\Sub"),
+            ("+", "value", IDENTITY_CRL + r"\Token\not-a-guid", "DeviceId"),
+            ("+", "value", SHELL_MUICACHE, self.R365_TEMP + r"\other.exe.FriendlyAppName"),
+            ("+", "value", SHELL_MUICACHE,
+             self.R365_TEMP + r"\LitePack-0.0.2-updater-5EsJTL\other.exe.FriendlyAppName"),
+            ("+", "value", SHELL_MUICACHE, r"D:\x" + mui),
+            ("+", "value", SHELL_MUICACHE, self.R365_TEMP + r"\sub" + mui),
+            ("+", "file", self.R365_PS),
+            ("-", "file", self.R365_PS),
+        ]
+        for line in misses:
+            self.assertIsNone(self.r365(*line), line)
+        # With no temp folder known, the MuiCache entry matches nothing.
+        with unittest.mock.patch.object(sys.modules[__name__], "temp_folder", lambda: None):
+            self.assertIsNone(allowed("value", SHELL_MUICACHE, self.R365_TEMP + mui, "+", snap()))
+
+    def test_r367_windows_search_record_of_the_webview2_jump_list(self):
+        # CI run 43683451272's one line, as printed, and the same value changed.
+        for sign in "+~":
+            self.assertIsNotNone(allowed("value", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Default",
+                                         sign, snap()))
+        self.assertEqual(WEBVIEW2_AUMID, "MSEdgeWebView.EBWebView.Default".upper())
+        misses = [
+            ("-", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Default"),
+            # LitePack's own record, which the uninstaller deletes.
+            ("+", SEARCH_JUMPLIST_DATA, "org.litepack.gui"),
+            ("~", SEARCH_JUMPLIST_DATA, "org.litepack.gui"),
+            ("+", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Profile 1"),
+            ("+", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Default.x"),
+            ("+", SEARCH_JUMPLIST_DATA + r"\Sub", "MSEdgeWebView.EBWebView.Default"),
+            ("+", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search", "MSEdgeWebView.EBWebView.Default"),
+        ]
+        for sign, key, name in misses:
+            self.assertIsNone(allowed("value", key, name, sign, snap()), (sign, key, name))
+        # The key itself is not excused: only that one value in it.
+        self.assertIsNone(allowed("key", SEARCH_JUMPLIST_DATA, None, "+", snap()))
+        # Registry names compare case-insensitively.
+        self.assertIsNotNone(allowed("value", SEARCH_JUMPLIST_DATA.lower(), "msedgewebview.ebwebview.default", "+",
+                                     snap()))
+
+    def test_r372_the_widgets_time_and_the_shell_refresh_keys(self):
+        refresh = LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\ShellRefresh"
+        # CI run 43689320509's installer job, both attempts, as printed (the default value's name is empty).
+        lines = [
+            ("+", "key", WIDGETS, None),
+            ("+", "value", WIDGETS, "WidgetsStateLastRun"),
+            ("~", "value", WIDGETS, "WidgetsStateLastRun"),
+            ("-", "key", refresh + r"\2", None),
+            ("-", "value", refresh + r"\2", ""),
+            ("+", "key", refresh + r"\17", None),
+            ("~", "value", refresh + r"\17", ""),
+        ]
+        for line in lines:
+            self.assertIsNotNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
+        misses = [
+            ("-", "key", WIDGETS, None),
+            ("-", "value", WIDGETS, "WidgetsStateLastRun"),
+            ("+", "value", WIDGETS, "Other"),
+            ("+", "key", WIDGETS + r"\Sub", None),
+            ("+", "value", WIDGETS + r"\Sub", "WidgetsStateLastRun"),
+            ("+", "key", refresh, None),
+            ("+", "value", refresh, ""),
+            ("+", "key", refresh + r"\x", None),
+            ("+", "key", refresh + r"\2\Sub", None),
+            ("+", "value", refresh + r"\2\Sub", ""),
+            ("+", "key", refresh + r"X\2", None),
+        ]
+        for line in misses:
+            self.assertIsNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
 
 
 if __name__ == "__main__":
