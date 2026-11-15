@@ -81,8 +81,10 @@ def zip_name(version):
 def path_pattern(path):
     """A regex matching `path` in any spelling cargo-cyclonedx may write it: each separator `/`, `\\`, `%2F` or `%5C`,
     each other character itself or percent-encoded (UTF-8 bytes), any letter case (Windows paths are case-blind), with
-    the third `/` of a `file:///D:/...` taken with it, so that `file:///D:/x` and `file://D:\\x` both become
-    `file:///lpk...` (a URL's `file:///` kept, never `file://lpk`, which would name a host)."""
+    the third `/` of a `file:///D:/...` (or `%2F` of `file%3A%2F%2F%2FD%3A...`) taken with it, so that `file:///D:/x`
+    and `file://D:\\x` both become `file:///lpk...` (a URL's `file:///` kept, never `file://lpk`, which would name a
+    host). The root must end there (R397): the end of the string, or a separator or URL delimiter in any spelling
+    (ROOT_END), so that `<root>2/...` or `<root>-old/...` is not taken for the root."""
     parts = []
     for c in str(path).rstrip("/\\"):
         if c in "/\\":
@@ -91,11 +93,18 @@ def path_pattern(path):
             enc = "".join(f"%{b:02X}" for b in c.encode("utf-8"))
             alts = [re.escape(c), re.escape(enc)] + ([r"\+"] if c == " " else [])
             parts.append("(?:" + "|".join(alts) + ")")
-    return re.compile(r"(?:(?<=//)/)?" + "".join(parts), re.IGNORECASE)
+    return re.compile(r"(?:(?<=//)/|(?<=%2F%2F)%2F)?" + "".join(parts) + ROOT_END, re.IGNORECASE)
 
 
+# What may follow the root in a match (R397): the end, or a separator or URL delimiter, plain or percent-encoded.
+ROOT_END = r'(?=$|/|\\|#|\?|&|"|%2F|%5C|%23|%3F|%26)'
+# A root that is only a drive (`W:`, `W:/`): refused, it would rewrite every `w:`.
+DRIVE_ONLY_RE = re.compile(r"[A-Za-z]:[/\\]*")
 # A Windows absolute path, plain or percent-encoded (`D:/`, `D:\`, `D%3A%2F`, ...): none may remain in a shipped SBOM.
-ABSOLUTE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?::|%3A)(?:/|\\|%2F|%5C)", re.IGNORECASE)
+# The drive letter follows no letter or digit, or follows a percent-encoded `/`, `\` or `:` (whose escape ends in a
+# hex digit; R397).
+ABSOLUTE_RE = re.compile(r"(?:(?<![A-Za-z0-9])|(?<=%2F)|(?<=%5C)|(?<=%3A))[A-Za-z](?::|%3A)(?:/|\\|%2F|%5C)",
+                         re.IGNORECASE)
 # The remap prefix of scripts/repro-build.sh (`--remap-path-prefix=<checkout>=/lpk`).
 REMAP = "/lpk"
 # The marker of the GUI's updater feature (crates/lpk-gui/tests/updater_feature.rs).
@@ -160,7 +169,12 @@ def problems(data, binary, triple, version, forbidden=()):
     if not isinstance(comps, list) or not comps:
         out.append("no components")
         comps = []
-    names = {c.get("name") for c in comps if isinstance(c, dict)}
+    # Every component an object with a string `type` and `name` (R397); the names only from those.
+    bad = [i for i, c in enumerate(comps) if not (isinstance(c, dict) and isinstance(c.get("type"), str)
+                                                  and isinstance(c.get("name"), str))]
+    if bad:
+        out.append(f"{len(bad)} component(s) not an object with a string type and name, the first components[{bad[0]}]")
+    names = {c["name"] for i, c in enumerate(comps) if i not in bad}
     if binary == "lpk-gui" and GUI_UPDATER not in names:
         out.append(f"no component {GUI_UPDATER} (the GUI's updater feature, as built)")
     if doc.get("bomFormat") != "CycloneDX":
@@ -199,6 +213,8 @@ def collect(target, version, root, out, raws, forbidden=None):
         raise Fail(f"{target} is not a shipped target")
     if not root or not ABSOLUTE_RE.match(str(root)):
         raise Fail(f"--root must be the checkout's absolute Windows path (as `cygpath -m` prints it), not {root!r}")
+    if DRIVE_ONLY_RE.fullmatch(str(root)):
+        raise Fail(f"--root must be the checkout, not a whole drive: {root!r}")
     forbidden = forbidden_paths(root) if forbidden is None else forbidden
     out = Path(out)
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
@@ -448,6 +464,33 @@ def self_test():
     ok("path_pattern: file:///D:/ and file://D:\\ both give file:///lpk",
        [pat.sub(REMAP, s) for s in ("file:///D:/a/lite pack/litepack/x", "file://D:\\a\\lite pack\\litepack\\x")]
        == ["file:///lpk/x", "file:///lpk\\x"])
+    # R397: the encoded third slash, and a boundary after the root.
+    ok("path_pattern: the encoded third slash is taken too",
+       pat.sub(REMAP, "file%3A%2F%2F%2FD%3A%2Fa%2Flite%20pack%2Flitepack%2Fx") == "file%3A%2F%2F/lpk%2Fx")
+    ends = ["", "/x", "\\x", "#1", "?a=1", "&b", '"', "%2Fx", "%5cx", "%23", "%3F", "%26"]
+    ok("path_pattern: the root followed by the end, a separator or a delimiter is rewritten",
+       all(pat.sub(REMAP, ROOT + e) == REMAP + e for e in ends))
+    longer = ["path+file:///D:/a/lite pack/litepack2/crates/x#1", "D:/a/lite pack/litepack-old/x",
+              "D:\\a\\lite pack\\litepack.bak", "D%3A%2Fa%2Flite%20pack%2Flitepack2"]
+    ok("path_pattern: a path that only begins like the root is left unchanged",
+       all(pat.sub(REMAP, s) == s for s in longer))
+    ok("those still fail on their absolute path", all(
+        any(p.startswith("an absolute Windows path remains") for p in problems(json.dumps(
+            {**json.loads(f("lpk")), "x": s}).encode(), "lpk", X, V)) for s in longer))
+    # R397: a drive letter after a percent escape is an absolute path too.
+    for s in ("download_url=file%3A%2F%2FE%3A%2Fother", "file%3A%2F%2F%2FE%3A%5Cx", "a%5Ce%3a%2fx", "x%3AE:/y"):
+        ok(f"ABSOLUTE_RE: {s} is an absolute path", ABSOLUTE_RE.search(s) is not None)
+    ok("ABSOLUTE_RE: a registry URL is not", ABSOLUTE_RE.search(
+        "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229") is None and ABSOLUTE_RE.search(
+        "pkg:cargo/serde@1.0.229?download_url=https%3A%2F%2Fcrates.io%2Fapi%2Fv1") is None)
+    # R397: every component an object with a string type and name.
+    ok("a null component fails", problems(f("lpk", components=[None]), "lpk", X, V) ==
+       ["1 component(s) not an object with a string type and name, the first components[0]"])
+    ok("a component whose name is a list fails, without a crash", problems(fake("lpk-gui", X, version=V, components=[
+        {"type": "library", "name": GUI_UPDATER}, {"type": "library", "name": ["x"]}]), "lpk-gui", X, V) ==
+       ["1 component(s) not an object with a string type and name, the first components[1]"])
+    ok("a component without a type fails", problems(f("lpk", components=[{"name": "x"}]), "lpk", X, V) ==
+       ["1 component(s) not an object with a string type and name, the first components[0]"])
     ok("path_pattern: another folder does not", not pat.search("D:/a/lite pack/other"))
     raw_doc = f("lpk", root=ROOT)
     root_left = problems(raw_doc, "lpk", X, V, FORBID)
@@ -515,6 +558,11 @@ def self_test():
                                                                FORBID, contains="not an empty folder"))
         ok("collect: a relative root is refused", raises(collect, X, V, "lite-pack", d / "rel", [d / "good" / "x64"],
                                                          FORBID, contains="--root must be"))
+        for drive in ("W:/", "w:\\", "W://"):
+            ok(f"collect: a drive-only root {drive!r} is refused", raises(
+                collect, X, V, drive, d / "drive", [d / "good" / "x64"], FORBID, contains="not a whole drive"))
+        ok("collect: a bare drive 'W:' is refused", raises(collect, X, V, "W:", d / "drive", [d / "good" / "x64"],
+                                                           FORBID, contains="--root must be"))
 
         def collect_fails(label, change, contains, arch="x64", version=V):
             name = label.replace(" ", "-").replace(":", "")
