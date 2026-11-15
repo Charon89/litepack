@@ -273,9 +273,9 @@ fn credentials(cli: &mut Cli) -> Result<Keys<'static>, FormatError> {
     // wrapper; the bytes handed on live in `Credentials`, which wipes them too.
     let given: Option<Zeroizing<String>> = cli.password.take().map(Zeroizing::new);
     let password = match (&given, &cli.password_file) {
-        (Some(p), _) => Some(p.as_bytes().to_vec()),
+        (Some(p), _) => Some(Zeroizing::new(p.as_bytes().to_vec())),
         (None, Some(f)) => {
-            let mut b = std::fs::read(f)?;
+            let mut b = Zeroizing::new(std::fs::read(f)?);
             if b.ends_with(b"\n") {
                 b.pop();
                 if b.ends_with(b"\r") {
@@ -293,7 +293,7 @@ fn credentials(cli: &mut Cli) -> Result<Keys<'static>, FormatError> {
     let credentials = match (password, keyfile) {
         (None, None) => None,
         (p, keyfile) => Some(Cow::Owned(Credentials {
-            password: p.unwrap_or_default(),
+            password: p.map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
             keyfile,
         })),
     };

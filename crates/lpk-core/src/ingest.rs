@@ -463,14 +463,22 @@ impl Walker<'_> {
         for e in rd {
             let e = e.map_err(|e| CoreError::io(dir, e))?;
             let path = e.path();
-            let rel = join(prefix, &e.file_name().to_string_lossy());
-            let Some(name) = e.file_name().to_str().map(str::to_string) else {
+            let file_name = e.file_name();
+            let md = e.metadata().map_err(|e| CoreError::io(&path, e))?;
+            let Some(name) = file_name.to_str().map(str::to_string) else {
+                // A hidden entry excluded by `include_hidden: false` is skipped before any
+                // name check, whatever its encoding (the lossy form keeps a leading dot).
+                let lossy = file_name.to_string_lossy();
+                if !self.options.include_hidden
+                    && attribute_flags(&md, &lossy).contains(EntryFlags::HIDDEN)
+                {
+                    continue;
+                }
                 return Err(CoreError::UnportableName {
-                    path: rel,
+                    path: join(prefix, &lossy),
                     reason: "not utf-8".to_string(),
                 });
             };
-            let md = e.metadata().map_err(|e| CoreError::io(&path, e))?;
             children.push(Child { name, path, md });
         }
         if self.options.follow_symlinks {
@@ -1210,6 +1218,31 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let name = std::ffi::OsStr::from_bytes(b"bad\xff.txt");
         fs::write(dir.path().join(name), b"x").unwrap();
+        match walk(dir.path(), &IngestOptions::default()) {
+            Err(CoreError::UnportableName { reason, .. }) => assert_eq!(reason, "not utf-8"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_excluded_hidden_non_utf8_name_is_skipped() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::ffi::OsStr::from_bytes(b".bad\xff.txt");
+        let sub = std::ffi::OsStr::from_bytes(b".dir\xfe");
+        fs::write(dir.path().join(file), b"x").unwrap();
+        fs::create_dir(dir.path().join(sub)).unwrap();
+        fs::write(dir.path().join(sub).join("inner"), b"y").unwrap();
+        write(dir.path(), "ok", 1);
+        let opts = IngestOptions {
+            include_hidden: false,
+            ..IngestOptions::default()
+        };
+        let got = walk(dir.path(), &opts).unwrap();
+        let paths: Vec<&str> = got.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["ok"]);
+        // Included, the same names still fail the walk.
         match walk(dir.path(), &IngestOptions::default()) {
             Err(CoreError::UnportableName { reason, .. }) => assert_eq!(reason, "not utf-8"),
             other => panic!("{other:?}"),

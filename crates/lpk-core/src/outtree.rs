@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::extract::Link;
+use lpk_format::EntryFlags;
+
+use crate::extract::{DirMeta, Link};
 use crate::motw::Zone;
 use crate::CoreError;
 
@@ -287,6 +289,143 @@ impl Tree {
         }
     }
 
+    /// Apply an entry's flags to a file this tree created, through its open write handle
+    /// (never by path, so never through a link), after its last write and its time. Windows:
+    /// read-only, hidden and system are added. Unix: read-only clears the write bits,
+    /// executable adds an execute bit for each read bit. Other systems: nothing.
+    pub(crate) fn set_file_flags(
+        &self,
+        f: &File,
+        path: &Path,
+        flags: EntryFlags,
+    ) -> Result<(), CoreError> {
+        #[cfg(windows)]
+        {
+            lpk_fs_sys::add_attributes(
+                f,
+                flags.contains(EntryFlags::READ_ONLY),
+                flags.contains(EntryFlags::HIDDEN),
+                flags.contains(EntryFlags::SYSTEM),
+            )
+            .map_err(|e| win::fs_err(path, e))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if !flags.contains(EntryFlags::READ_ONLY) && !flags.contains(EntryFlags::EXECUTABLE) {
+                return Ok(());
+            }
+            let mut perm = f.metadata().map_err(|e| io(path, e))?.permissions();
+            let mut mode = perm.mode();
+            if flags.contains(EntryFlags::EXECUTABLE) {
+                mode |= (mode & 0o444) >> 2;
+            }
+            if flags.contains(EntryFlags::READ_ONLY) {
+                mode &= !0o222;
+            }
+            if mode != perm.mode() {
+                perm.set_mode(mode);
+                f.set_permissions(perm).map_err(|e| io(path, e))?;
+            }
+            Ok(())
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (f, path, flags);
+            Ok(())
+        }
+    }
+
+    /// Set the attributes (hidden and system, on Windows) and times of the directories this
+    /// extraction created, the deepest first, once every file is finished. Each directory is
+    /// opened as itself, never through a link: on Windows relative to its held parent with
+    /// its recorded file ID; on Unix with `O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK`, a directory
+    /// (not a link) before the open and the same inode after it. A directory that cannot be
+    /// set is a warning (returned, one message each), never an error.
+    pub(crate) fn finish_dirs(&self, dirs: &[DirMeta]) -> Vec<String> {
+        let mut order: Vec<&DirMeta> = dirs.iter().collect();
+        order.sort_by_key(|d| std::cmp::Reverse(d.path.components().count()));
+        let mut warnings = Vec::new();
+        for d in order {
+            if let Err(e) = self.finish_dir(d) {
+                warnings.push(format!("its time and attributes were not set: {e}"));
+            }
+        }
+        warnings
+    }
+
+    fn finish_dir(&self, d: &DirMeta) -> Result<(), CoreError> {
+        #[cfg(test)]
+        if seam::finish_dir_refused() {
+            return Err(io(
+                &d.path,
+                std::io::Error::other("the time and attributes refused (test seam)"),
+            ));
+        }
+        let time = crate::extract::mtime(d.mtime_ns);
+        let hidden = d.flags.contains(EntryFlags::HIDDEN);
+        let system = d.flags.contains(EntryFlags::SYSTEM);
+        if time.is_none() && !(cfg!(windows) && (hidden || system)) {
+            return Ok(());
+        }
+        let f = self.open_dir_attributes(&d.path)?;
+        #[cfg(windows)]
+        lpk_fs_sys::add_attributes(&f, false, hidden, system)
+            .map_err(|e| win::fs_err(&d.path, e))?;
+        if let Some(m) = time {
+            f.set_modified(m).map_err(|e| io(&d.path, e))?;
+        }
+        Ok(())
+    }
+
+    fn open_dir_attributes(&self, path: &Path) -> Result<File, CoreError> {
+        let rel = self.rel(path)?;
+        #[cfg(test)]
+        seam::before_open_dir(path);
+        #[cfg(windows)]
+        {
+            let id = self.win.dir(&self.root, rel, false)?.id();
+            let (parent, name) = self.win.parent_of(&self.root, rel, path)?;
+            parent
+                .open_dir_attributes(name, id)
+                .map_err(|e| win::fs_err(path, e))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rel;
+            let before = std::fs::symlink_metadata(path).map_err(|e| io(path, e))?;
+            if !before.file_type().is_dir() {
+                return Err(io(
+                    path,
+                    std::io::Error::other("not a directory (a link or a file is in its place)"),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+                #[cfg(test)]
+                seam::after_dir_check(path);
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK)
+                    .open(path)
+                    .map_err(|e| io(path, e))?;
+                let after = f.metadata().map_err(|e| io(path, e))?;
+                if (after.dev(), after.ino()) != (before.dev(), before.ino()) {
+                    return Err(io(
+                        path,
+                        std::io::Error::other("the directory changed while it was opened"),
+                    ));
+                }
+                Ok(f)
+            }
+            #[cfg(not(unix))]
+            {
+                File::open(path).map_err(|e| io(path, e))
+            }
+        }
+    }
+
     /// Reopen a file this tree created, for writing (without create, without truncation).
     pub(crate) fn reopen(&self, c: &Created) -> Result<File, CoreError> {
         self.open_created(c, true)
@@ -498,8 +637,8 @@ mod win {
 
 /// Test hooks (`cfg(test)` only, so absent from every other build, as D-99 (8)'s hooks): a
 /// per-thread function called just before a directory is opened and just before a file is
-/// created (after its parent was verified), and a per-thread override of the symlink
-/// privilege probe.
+/// created (after its parent was verified), a per-thread override of the symlink
+/// privilege probe, and a per-thread refusal of the directories' times and attributes.
 #[cfg(test)]
 mod tests;
 
@@ -513,8 +652,20 @@ pub(crate) mod seam {
     thread_local! {
         static BEFORE_CREATE: RefCell<Option<Hook>> = RefCell::new(None);
         static BEFORE_OPEN_DIR: RefCell<Option<Hook>> = RefCell::new(None);
+        static AFTER_DIR_CHECK: RefCell<Option<Hook>> = RefCell::new(None);
         static PRIVILEGE: Cell<Option<bool>> = const { Cell::new(None) };
         static MAX_HELD: Cell<Option<usize>> = const { Cell::new(None) };
+        static REFUSE_FINISH_DIR: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make every directory time and attribute set on this thread fail, as a volume or a
+    /// filter refusing it would.
+    pub(crate) fn refuse_finish_dir(on: bool) {
+        REFUSE_FINISH_DIR.with(|c| c.set(on));
+    }
+
+    pub(super) fn finish_dir_refused() -> bool {
+        REFUSE_FINISH_DIR.with(Cell::get)
     }
 
     /// Hold at most `n` directories on this thread's trees (`None`: [`super::MAX_HELD`]).
@@ -533,9 +684,26 @@ pub(crate) mod seam {
     }
 
     /// Call `f` with a directory's full path just before it is opened relative to its parent
-    /// (Windows only: elsewhere directories are made by path).
+    /// (Windows), and before the directory pass opens a directory for its time and attributes
+    /// (every system).
     pub(crate) fn on_before_open_dir(f: Option<Hook>) {
         BEFORE_OPEN_DIR.with(|h| *h.borrow_mut() = f);
+    }
+
+    /// Call `f` with a directory's full path in the directory pass on Unix, after the check
+    /// that it is a directory (not a link) and before its `O_NOFOLLOW` open.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn on_after_dir_check(f: Option<Hook>) {
+        AFTER_DIR_CHECK.with(|h| *h.borrow_mut() = f);
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn after_dir_check(p: &Path) {
+        AFTER_DIR_CHECK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(p);
+            }
+        });
     }
 
     pub(crate) fn before_create(p: &Path) {
