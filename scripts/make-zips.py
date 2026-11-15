@@ -60,7 +60,8 @@ shared folder, your desktop. Nothing is installed.
 One thing is kept outside this folder. The first time you open an archive that is not a {PRODUCT}
 archive (zip, 7z, rar, tar and so on), Windows creates a sandbox profile named LitePack.Worker for
 the program that reads it, so that a hostile archive cannot reach your files. To remove the
-profile, run this in this folder:
+profile, press "Remove the sandbox profile" in the window's About box (Settings, then About
+{PRODUCT}), or run this in this folder:
 
     lpk-worker.exe --remove-profile
 
@@ -289,6 +290,7 @@ class Tests(unittest.TestCase):
             self.assertEqual(z.read("LitePack/portable"), b"")
             self.assertIn(b"data\\", z.read("LitePack/README.txt"))
             self.assertIn(b"--remove-profile", z.read("LitePack/README.txt"))
+            self.assertIn(b"Remove the sandbox profile", z.read("LitePack/README.txt"))
 
     def test_the_cli_zip_has_neither_the_gui_nor_the_marker(self):
         _, c = self.build("o")

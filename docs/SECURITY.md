@@ -95,6 +95,9 @@ Stated by the decisions that built the sandbox; none is closed by this note.
    Other platforms have no pin (and no zone).
 8. The tests run on Windows 11 and `windows-2025` CI; the run on Windows 10 22H2 is by hand on E5-10's machine and
    has not happened yet (D-97, D-105).
+9. The GUI's About box removes the `LitePack.Worker` profile only while no operation of its own window runs; removing
+   it while another LitePack process (a terminal `lpk x`, a second window) uses it can make that process's next worker
+   launch fail once, after which the profile is made again.
 
 ## 4. Crash containment (E4-5)
 
@@ -152,3 +155,9 @@ without named streams gives one warning (D-119).
 The policy and the way to report are in the root `SECURITY.md`. Report privately, through GitHub's "Report a
 vulnerability" button on the repository's Security tab (private vulnerability reporting), never in a public issue,
 pull request or discussion.
+
+Extraction on Unix (E2-19's parked items): the directory pass that sets an extracted directory's time opens it
+with `O_NOFOLLOW | O_DIRECTORY | O_NONBLOCK` and checks the inode, and touches only directories the extraction
+created; the parent chain above it is not checked on Unix (the plan's linked-parent check, made once before
+writing, is the guard; opening relative to verified directory handles there is a parked item). On Windows every
+directory is opened relative to its held, verified parent.

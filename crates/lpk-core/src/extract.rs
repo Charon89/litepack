@@ -98,9 +98,12 @@
 //! closed with its modification time set as soon as its last chunk is written; files with no
 //! chunk are created during the plan. At most [`ExtractOptions::max_open_files`] files are open
 //! (split over the writers); when a writer's set is full the file it opened longest ago is
-//! closed and reopened (without create, without truncation) when its next chunk comes. Entry
-//! flags are not applied (the format tool applies none either); directory times are not
-//! restored.
+//! closed and reopened (without create, without truncation) when its next chunk comes. A file's
+//! entry flags are applied after its time, through the same handle, as its last step
+//! ([`Tree::set_file_flags`]: read-only, hidden and system on Windows; on Unix read-only clears
+//! the write bits and executable adds an execute bit per read bit). Once every file is
+//! finished, the directory entries' attributes (hidden, system) and times are set deepest
+//! first ([`Tree::finish_dirs`]), so nothing written later moves a directory's time.
 //!
 //! **Failure.** The first error — a decode error (named with its block and the first file
 //! placed in it), a writer's I/O error, a thread that cannot be started, or a panic in any
@@ -132,7 +135,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lpk_format::{Archive, Credentials, Entry, EntryKind, FormatError, MemoryPriors};
+use lpk_format::{Archive, Credentials, Entry, EntryFlags, EntryKind, FormatError, MemoryPriors};
 
 use crate::memory::{Budget, BudgetSource, EnvelopeTier};
 use crate::outtree::{can_create_symlinks, Created, Tree};
@@ -239,6 +242,9 @@ pub struct ExtractSummary {
     /// Mark of the Web: a file could not carry [`ExtractOptions::zone`] (the destination's
     /// volume has no named streams, or the write failed); the caller prints one warning.
     pub motw_unmarked: bool,
+    /// Directories this extraction created whose time or attributes could not be set (a
+    /// warning for the caller: the extraction itself succeeded).
+    pub dirs_unset: u64,
     /// Most decoded blocks held at once, measured (permits taken and not yet returned): never
     /// above `in_flight`. 1 on the sequential path when a block was decoded, else 0.
     pub peak_in_flight: usize,
@@ -415,8 +421,18 @@ struct Target {
     size: u64,
     chunks: u64,
     mtime_ns: i64,
+    /// The entry's flags, applied when the file is finished.
+    flags: EntryFlags,
     /// What is at `path` is removed (as a link when it is one) just before the file is created.
     replace: bool,
+}
+
+/// A directory entry's time and flags, set after every file of the extraction is finished.
+#[derive(Debug)]
+pub(crate) struct DirMeta {
+    pub(crate) path: PathBuf,
+    pub(crate) mtime_ns: i64,
+    pub(crate) flags: EntryFlags,
 }
 
 /// A symlink entry to create, after the directories and before the files.
@@ -515,6 +531,8 @@ fn finish(shared: &Shared, file: usize, f: &File) -> Result<(), CoreError> {
     if let Some(m) = mtime(t.mtime_ns) {
         f.set_modified(m).map_err(|e| io(&t.path, e))?;
     }
+    // Last, so no write of this extraction ever meets a read-only file it made.
+    shared.tree()?.set_file_flags(f, &t.path, t.flags)?;
     shared.set(file, COMPLETE);
     shared.files.fetch_add(1, Ordering::Relaxed);
     Ok(())
@@ -1069,6 +1087,8 @@ struct Plan {
     mkdirs: Vec<PathBuf>,
     /// The symlink entries to create, in entry order.
     links: Vec<Link>,
+    /// The directory entries placed: their paths, times and flags, set after the files.
+    dir_meta: Vec<DirMeta>,
     /// Entries skipped because of what existed at their target.
     skipped: u64,
     /// Entries written under a new name.
@@ -1502,10 +1522,22 @@ fn plan<R: Read + Seek>(
     let mut per_block: Vec<Vec<Place>> = vec![Vec::new(); blocks];
     let mut targets: Vec<Target> = Vec::new();
     let mut links: Vec<Link> = Vec::new();
+    let mut dir_meta: Vec<DirMeta> = Vec::new();
     let mut placements = 0u64;
     for (e, p) in pass.entries.iter().zip(std::mem::take(&mut pass.placed)) {
         match p {
-            Placed::Dir(_) | Placed::Skipped => {}
+            Placed::Skipped => {}
+            // Only a directory this extraction creates gets the entry's time and attributes:
+            // one that exists already (reused under every overwrite mode) is the user's.
+            Placed::Dir(path) => {
+                if std::fs::symlink_metadata(&path).is_err() {
+                    dir_meta.push(DirMeta {
+                        path,
+                        mtime_ns: e.mtime_ns,
+                        flags: e.flags,
+                    });
+                }
+            }
             Placed::Link(l) => links.push(l),
             Placed::File { path, replace } => {
                 let file = targets.len();
@@ -1541,6 +1573,7 @@ fn plan<R: Read + Seek>(
                     size: e.size,
                     chunks: e.chunks.len() as u64,
                     mtime_ns: e.mtime_ns,
+                    flags: e.flags,
                     replace,
                 });
             }
@@ -1571,6 +1604,7 @@ fn plan<R: Read + Seek>(
         name_bytes,
         mkdirs,
         links,
+        dir_meta,
         skipped: pass.skipped,
         renamed: pass.renamed,
         symlinks_skipped: pass.symlinks_skipped,
@@ -2058,6 +2092,7 @@ where
         name_bytes,
         mkdirs,
         links,
+        dir_meta,
         skipped,
         renamed,
         symlinks_skipped,
@@ -2214,6 +2249,9 @@ where
             resume_unwind(p);
         }
     }
+    // Every file is finished: the directories' attributes and times, deepest first.
+    // A directory whose time or attributes cannot be set is a warning, never an error.
+    let dir_warnings = tree.finish_dirs(&dir_meta);
     // The writers ran behind the dispatch: the last event carries the final counts.
     rep.set(
         Stage::Extract,
@@ -2245,6 +2283,7 @@ where
         symlinks: links.len() as u64,
         symlinks_skipped,
         motw_unmarked: tree.unmarked(),
+        dirs_unset: dir_warnings.len() as u64,
         peak_in_flight: peak.load(Ordering::Relaxed),
         alone_decodes: gate.alone_runs(),
         concurrent_while_alone: gate.concurrent_while_alone(),
