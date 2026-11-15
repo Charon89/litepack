@@ -3,8 +3,8 @@
 Hand-off between sessions and machines (D-13). Read this first; update it whenever work stops mid-task;
 delete an entry when its branch is merged. `docs/PLAN.md` stays the source of truth for what is done.
 
-Last updated: 2026-11-15, about 16:50 UTC (11:50 local). **Session of 2026-11-05 (into 2026-11-15).**
-- **In flight (the owner's go, 07:35 local on 2026-11-08):** nothing. Merged on 2026-11-15: E7-7 (D-164, #169), three parked Phase 1 items (D-165, #170), the About box (D-166, #173), E7-2 part 1 (D-168, #172), five parked follow-ups (D-169, #174), E7-2 part 1c (D-171, #175) and part 1d (D-172, #176, `a556d45`); the owner approved the privacy page's R364 wording (D-170). Before that: E7-6 (D-161, #167), the follow-ups R213 and R287 (D-162, #166) and E7-5 part 1 (D-163, #168). Ledger: `ledger-2026-11-08-wave2.md` in the hand-off folder.
+Last updated: 2026-11-15, about 16:56 UTC (11:56 local). **Session of 2026-11-05 (into 2026-11-15).**
+- **In flight (the owner's go, 07:35 local on 2026-11-08):** E7-2 part 1e (#177; its branch is below). Merged on 2026-11-15: E7-7 (D-164, #169), three parked Phase 1 items (D-165, #170), the About box (D-166, #173), E7-2 part 1 (D-168, #172), five parked follow-ups (D-169, #174), E7-2 part 1c (D-171, #175) and part 1d (D-172, #176, `a556d45`); the owner approved the privacy page's R364 wording (D-170). Before that: E7-6 (D-161, #167), the follow-ups R213 and R287 (D-162, #166) and E7-5 part 1 (D-163, #168). Ledger: `ledger-2026-11-08-wave2.md` in the hand-off folder.
 
 **The night of 2026-11-07/08 (owner-approved):**
 - **Merged:** the README front page (D-156, #163), three hardening follow-ups (D-157, #164), the weekly script's worker step (D-158, #165) and E7-8 part 1 (D-159, #162).
@@ -138,6 +138,7 @@ E3-8 is done (D-75, PR #77).
 - Two things the trial reports on `small` (both pairs) showed need the owner's reading before D-08: gate G2 (versioned backup, 2× smaller) fails because the incumbents already remove the cross-version redundancy inside solid archives (the estimate sits around 110% of zpaqfranz m5 on `small`), and gate G3 (video store speed) as proxied compares a cache-warm store pass with an uncached raw read (23% on `small`'s 66 MB video class). Neither is a measurement error; both are questions of what the gate should mean, to be answered in D-08 or by amending D-07 (a gate change is the owner's).
 
 ## Branches in flight
+- `task/e7-2e` (PR #177, draft; from `main`, 2026-11-15): E7-2 part 1e, `verify-x64` (windows-2025) and `verify-arm64` (windows-11-arm) in `release.yml`: the release's own installer installed, used (`lpk` from the user Path, a round trip, a `.zip` through the installed worker, the GUI's smoke report) and uninstalled with the residue diff, and the portable zip's snapshot, on each architecture; on windows-11-arm the residue tool runs under x64 Python by emulation. Under review; CI's first run will show the ARM64 runner's own Windows records, each ruled on before it is allowed. Left: rounds as needed, CI, the squash and its D-entry.
 - Follow-ups noted in the D-entries, for the tasks named: E7-5 part 2 — the sparse package in `identity\`, with E6-3 and E7-3's certificate (D-163); the profile-removal button of design §5 is in the About box (R299, D-166). The check of `nsis_tauri_utils`' crates is done (R272, D-163), and the WebView2 loader's licence text is pinned and in the notices (D-159). The E6-5 follow-ups (`export --force`, the foreign archive reopened by path) and the 404 directive check are done (D-157).
 - Not this session's: PRs #57 and #59 (`claude/*` branches of another session, 2026-10-17), left as they are; old merged `task/e2-10-*`, `task/e2-15-probe`, `task/e2-20-*` and `task/e2-22-lpk-rows` branches remain on `origin`.
 
