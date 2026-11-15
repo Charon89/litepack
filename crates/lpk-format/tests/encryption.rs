@@ -718,3 +718,59 @@ fn a_recorded_sequence_that_differs_from_the_real_one_fails_the_tag() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn lpk_decode_refuses_an_unneeded_keyfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kf_bytes = b"the second factor".to_vec();
+    let kf = tmp.path().join("key.bin");
+    std::fs::write(&kf, &kf_bytes).unwrap();
+    let kf = kf.to_str().unwrap();
+    let pw_only = tmp.path().join("pw.lpk");
+    std::fs::write(&pw_only, build(Suite::AesGcm, false, None)).unwrap();
+    let pw_only = pw_only.to_str().unwrap();
+    let two = tmp.path().join("two.lpk");
+    std::fs::write(&two, build(Suite::AesGcm, false, Some(kf_bytes))).unwrap();
+    let two = two.to_str().unwrap();
+    for cmd in ["list", "verify", "info"] {
+        // A password-only archive: a keyfile is refused, before anything is read.
+        let (code, out, err) = tool(&[
+            "lpk-decode",
+            cmd,
+            "--password",
+            "pw",
+            "--keyfile",
+            kf,
+            pw_only,
+        ]);
+        assert_eq!(code, 1, "{cmd}: {out}");
+        assert!(out.is_empty(), "{cmd}: {out}");
+        assert!(
+            err.contains("takes no keyfile; --keyfile is not needed"),
+            "{cmd}: {err}"
+        );
+        // Without one it opens.
+        let (code, _, err) = tool(&["lpk-decode", cmd, "--password", "pw", pw_only]);
+        assert_eq!(code, 0, "{cmd}: {err}");
+        // A keyfile archive still needs its keyfile, and takes it.
+        let (code, _, err) = tool(&["lpk-decode", cmd, "--password", "pw", two]);
+        assert_eq!(code, 1, "{cmd}");
+        assert!(!err.contains("not needed"), "{cmd}: {err}");
+        let (code, _, err) = tool(&["lpk-decode", cmd, "--password", "pw", "--keyfile", kf, two]);
+        assert_eq!(code, 0, "{cmd}: {err}");
+    }
+    // Extraction writes nothing when the keyfile is refused.
+    let dest = tmp.path().join("out");
+    let (code, _, err) = tool(&[
+        "lpk-decode",
+        "extract",
+        "--password",
+        "pw",
+        "--keyfile",
+        kf,
+        pw_only,
+        dest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(!dest.exists());
+}

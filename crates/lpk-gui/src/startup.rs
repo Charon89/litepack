@@ -17,15 +17,22 @@ pub const WEBVIEW_RETRY_FOR: Duration = Duration::from_secs(10);
 /// The whole window of retries while the user data folder is in use (R358): the old instance's
 /// WebView2 browser process can hold it for more than 10 s after that instance has gone.
 pub const WEBVIEW_IN_USE_RETRY_FOR: Duration = Duration::from_secs(30);
-/// `ERROR_BUSY` as an HRESULT ("The requested resource is in use."): the code is the same in
-/// every language, the text is not.
-pub const IN_USE_HRESULT: &str = "0x800700AA";
+/// The HRESULTs that mean the user data folder is still in use: another process (the old
+/// instance's WebView2 browser) holds the folder or its files. The codes are the same in every
+/// language, the text is not.
+/// - `0x800700AA`, `ERROR_BUSY` ("The requested resource is in use.", R358);
+/// - `0x80070020`, `ERROR_SHARING_VIOLATION` (a file of the folder is open in another process);
+/// - `0x80070021`, `ERROR_LOCK_VIOLATION` (a part of a file of the folder is locked by another
+///   process).
+pub const IN_USE_HRESULTS: [&str; 3] = ["0x800700AA", "0x80070020", "0x80070021"];
 
-/// Whether `error` (a failed try's text) is the user data folder still in use.
+/// Whether `error` (a failed try's text) is the user data folder still in use: it names one of
+/// [`IN_USE_HRESULTS`], in either case.
 pub fn in_use(error: &str) -> bool {
-    error
-        .to_ascii_uppercase()
-        .contains(&IN_USE_HRESULT.to_ascii_uppercase())
+    let error = error.to_ascii_uppercase();
+    IN_USE_HRESULTS
+        .iter()
+        .any(|code| error.contains(&code.to_ascii_uppercase()))
 }
 
 /// Whether the main webview is tried again after a try failed with `error`, `spent` after the
@@ -225,10 +232,149 @@ pub fn opened_note(
     })
 }
 
+/// What [`remove_alternate`] found at `<state>\WebView2-2` (R364).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlternateSweep {
+    /// The start's webview runs on the alternate folder itself: nothing is touched.
+    InUse,
+    /// No alternate folder.
+    Absent,
+    /// The alternate folder was removed.
+    Removed,
+    /// Something other than a plain folder (a file, a symbolic link, a junction or another reparse
+    /// point) is at that path: left as it is, never followed.
+    NotAFolder,
+}
+
+/// R364: once a start has created its webview on the primary folder (`used`), remove the
+/// alternate WebView2 folder (`<state>\WebView2-2`, `paths::WEBVIEW_ALTERNATE`, made only while the
+/// primary was held by a LitePack that had just ended) if it is there; the caller runs this in the
+/// background and best effort (an error is logged, never shown; the next start tries again).
+///
+/// Only that exact path under `state` is removed, and only when it is a plain folder: a file or a
+/// reparse point there is left alone, so the removal never follows a link out of the state folder.
+/// Inside the folder, `std::fs::remove_dir_all` does not follow links either: it removes a symbolic
+/// link or a junction it meets as the link itself, never its target (Rust's documented behaviour
+/// since 1.58.1, CVE-2022-21658; `the_alternate_folder_goes_and_a_link_inside_it_is_not_followed`
+/// checks it).
+pub fn remove_alternate(state: &Path, used: WebviewFolder) -> std::io::Result<AlternateSweep> {
+    if used != WebviewFolder::Primary {
+        return Ok(AlternateSweep::InUse);
+    }
+    let dir = state.join(crate::paths::WEBVIEW_ALTERNATE);
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AlternateSweep::Absent),
+        Err(e) => Err(e),
+        Ok(m) if !m.is_dir() || !crate::update::plain(&m) => Ok(AlternateSweep::NotAFolder),
+        Ok(_) => std::fs::remove_dir_all(&dir).map(|()| AlternateSweep::Removed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// A directory link at `link` to `target`: a symbolic link on Unix, a junction on Windows
+    /// (`mklink /J` needs no privilege, as lpk-bench's scan tests use it).
+    fn dir_link(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("spawn cmd for mklink /J");
+            assert!(made.status.success(), "mklink /J failed");
+        }
+    }
+
+    fn webview_state() -> (tempfile::TempDir, std::path::PathBuf) {
+        let state = tempfile::tempdir().unwrap();
+        let alternate = state.path().join(crate::paths::WEBVIEW_ALTERNATE);
+        (state, alternate)
+    }
+
+    #[test]
+    fn the_alternate_folder_is_removed_after_a_start_on_the_primary() {
+        let (state, alternate) = webview_state();
+        std::fs::create_dir_all(alternate.join("EBWebView").join("Default")).unwrap();
+        std::fs::write(alternate.join("EBWebView").join("Local State"), b"{}").unwrap();
+        std::fs::create_dir(state.path().join("WebView2")).unwrap();
+        std::fs::write(state.path().join("settings.json"), b"{}").unwrap();
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::Removed
+        );
+        assert!(!alternate.exists());
+        // Nothing else in the state folder is touched; a second start finds nothing to do.
+        assert!(state.path().join("WebView2").is_dir());
+        assert!(state.path().join("settings.json").is_file());
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::Absent
+        );
+    }
+
+    #[test]
+    fn nothing_is_removed_when_the_start_used_the_alternate() {
+        let (state, alternate) = webview_state();
+        std::fs::create_dir_all(alternate.join("EBWebView")).unwrap();
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Alternate).unwrap(),
+            AlternateSweep::InUse
+        );
+        assert!(alternate.join("EBWebView").is_dir());
+    }
+
+    #[test]
+    fn a_file_at_the_alternate_path_stays() {
+        let (state, alternate) = webview_state();
+        std::fs::write(&alternate, b"not a folder").unwrap();
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::NotAFolder
+        );
+        assert_eq!(std::fs::read(&alternate).unwrap(), b"not a folder");
+    }
+
+    #[test]
+    fn a_link_at_the_alternate_path_is_not_followed() {
+        let (state, alternate) = webview_state();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), b"the user's").unwrap();
+        dir_link(outside.path(), &alternate);
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::NotAFolder
+        );
+        assert!(std::fs::symlink_metadata(&alternate).is_ok());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep.txt")).unwrap(),
+            b"the user's"
+        );
+    }
+
+    #[test]
+    fn the_alternate_folder_goes_and_a_link_inside_it_is_not_followed() {
+        let (state, alternate) = webview_state();
+        std::fs::create_dir(&alternate).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), b"the user's").unwrap();
+        dir_link(outside.path(), &alternate.join("link"));
+        assert_eq!(
+            remove_alternate(state.path(), WebviewFolder::Primary).unwrap(),
+            AlternateSweep::Removed
+        );
+        assert!(!alternate.exists());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep.txt")).unwrap(),
+            b"the user's"
+        );
+    }
 
     #[test]
     fn one_retry_note_per_start_only_after_a_retry() {
@@ -311,6 +457,61 @@ mod tests {
         assert!(webview_retry("another error", Duration::from_millis(9_500)));
         assert!(!webview_retry("another error", Duration::from_secs(10)));
         assert!(!webview_retry("another error", Duration::from_secs(11)));
+    }
+
+    const SHARING: &str = "HRESULT(0x80070020) The process cannot access the file because it is being used by another process.";
+    const LOCK: &str = "HRESULT(0x80070021) The process cannot access the file because another process has locked a portion of the file.";
+
+    #[test]
+    fn sharing_and_lock_violations_are_in_use_too() {
+        for (code, text) in [
+            ("0x800700AA", BUSY),
+            ("0x80070020", SHARING),
+            ("0x80070021", LOCK),
+        ] {
+            assert!(IN_USE_HRESULTS.contains(&code));
+            assert!(in_use(text), "{code}");
+            assert!(
+                in_use(&format!("hresult({})", code.to_ascii_lowercase())),
+                "{code}"
+            );
+            assert!(
+                in_use(&format!("HRESULT({})", code.to_ascii_uppercase())),
+                "{code}"
+            );
+            // The 30 s bound, not the 10 s one.
+            assert!(webview_retry(text, Duration::from_secs(12)), "{code}");
+            assert!(webview_retry(text, Duration::from_millis(29_500)), "{code}");
+            assert!(!webview_retry(text, Duration::from_secs(30)), "{code}");
+        }
+        // Neighbouring and other codes are not.
+        for other in [
+            "HRESULT(0x80070005) Access is denied.",
+            "HRESULT(0x8007001F)",
+            "HRESULT(0x80070022)",
+            "HRESULT(0x800700AB)",
+            "HRESULT(0x80004005) Unspecified error",
+            "another error",
+        ] {
+            assert!(!in_use(other), "{other}");
+            assert!(!webview_retry(other, Duration::from_secs(10)), "{other}");
+        }
+    }
+
+    #[test]
+    fn each_in_use_code_switches_after_2_s() {
+        for text in [BUSY, SHARING, LOCK] {
+            // The primary fails with `text`, the alternate opens.
+            let (used, ended) = run(|f, _| (f == WebviewFolder::Primary).then(|| in_use(text)));
+            assert!(!ended, "{text}");
+            let mut want = vec![WebviewFolder::Primary; 5];
+            want.push(WebviewFolder::Alternate);
+            assert_eq!(used, want, "{text}");
+            // Both fail with `text` for the whole 30 s.
+            let (used, ended) = run(|_, _| Some(in_use(text)));
+            assert!(ended, "{text}");
+            assert_eq!(used.len(), 61, "{text}");
+        }
     }
 
     #[test]

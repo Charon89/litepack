@@ -157,7 +157,7 @@ pub fn download_folder_version<'a>(name: &'a str, app: &str) -> Option<&'a str> 
 }
 
 /// Whether `meta` is a plain entry: no symbolic link, junction or other reparse point.
-fn plain(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn plain(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
