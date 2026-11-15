@@ -195,6 +195,10 @@ pub struct ExtractResult {
     pub unprivileged_symlinks: Vec<String>,
     /// The Mark of the Web could not be written on some file.
     pub motw_unmarked: bool,
+    /// Folders this extraction created whose times or attributes could not be set (E2-19,
+    /// `lpk_core::ExtractSummary::dirs_unset`): they keep the ones they had when created. The
+    /// extraction itself succeeded; 0 for a foreign archive (its reader does not count them).
+    pub dirs_unset: u64,
     /// How the data was checked; none unless a file was written (a cancelled run claims nothing).
     pub check: Option<Check>,
     /// How the run ended.
@@ -377,6 +381,15 @@ pub fn check_of(outcome: &Extracted) -> Option<Check> {
     }
 }
 
+/// The folders a finished extraction created whose times or attributes could not be set (E2-19:
+/// the engine's `dirs_unset`, which the CLI warns of); a foreign archive's reader counts none.
+pub fn dirs_unset_of(outcome: &Extracted) -> u64 {
+    match outcome {
+        Extracted::Lpk(s) => s.dirs_unset,
+        Extracted::Foreign(_) => 0,
+    }
+}
+
 /// Watches the engine's events for what an extraction wrote, and passes them on.
 struct Seen {
     files: std::sync::atomic::AtomicU64,
@@ -410,6 +423,7 @@ fn cancelled_result(job: &Job<'_>, folder: String, files: u64, bytes: u64) -> Ex
         refused_symlinks: Vec::new(),
         unprivileged_symlinks: Vec::new(),
         motw_unmarked: false,
+        dirs_unset: 0,
         check: None,
         outcome: Outcome::CancelledAfterStart,
         left_out: job.left_out,
@@ -430,6 +444,7 @@ pub(crate) fn cancelled_before(archive: &str) -> ExtractResult {
         refused_symlinks: Vec::new(),
         unprivileged_symlinks: Vec::new(),
         motw_unmarked: false,
+        dirs_unset: 0,
         check: None,
         outcome: Outcome::CancelledBeforeStart,
         left_out: 0,
@@ -525,6 +540,7 @@ fn attempt(s: &Session, job: &Job<'_>, monitor: &Monitor) -> Result<ExtractResul
             .collect(),
         unprivileged_symlinks: report.unprivileged_symlinks.clone(),
         motw_unmarked: report.motw_unmarked,
+        dirs_unset: dirs_unset_of(&report.outcome),
         check: check_of(&report.outcome),
         outcome: Outcome::Done,
         left_out: job.left_out,

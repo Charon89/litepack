@@ -165,6 +165,8 @@
   "extract.check.partial": "Checked: {matched} members matched their stored checksum; {none} had none to check.",
   "extract.check.unverifiable": "Not verifiable: this format stores nothing to check against.",
   "extract.motw": "Some files could not be marked as downloaded from the internet on this drive.",
+  "extract.dirsunset.one": "1 folder kept the times or attributes it had when created.",
+  "extract.dirsunset.other": "{count} folders kept the times or attributes they had when created.",
   "extract.links.skipped": "Links not created: {list}",
   "extract.links.refused": "Link refused ({reason}): {path}",
   "extract.links.unprivileged": "Links not created, because this account may not create them: {list}",
