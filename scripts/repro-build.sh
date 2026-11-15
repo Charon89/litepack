@@ -9,9 +9,9 @@
 # `cargo tauri build --no-bundle`, so the frontend is embedded; tauri-cli at the version of
 # scripts/release-tools.env). `lpk-bench`, `lpk-test-worker` and the test helpers are not shipped.
 #   --auditable  every cargo build of a shipped crate runs as `cargo auditable build` (the GUI's through
-#                tauri-cli's `--runner scripts/cargo-auditable.cmd`), and each copied exe must carry
-#                cargo-auditable's `.dep-v0` section (scripts/e7-pe-sections.py); lpk_shell.dll (a
-#                cdylib) is reported, not required, until CI shows whether it carries one.
+#                tauri-cli's `--runner scripts/cargo-auditable.cmd`), and each copied binary, the
+#                cdylib lpk_shell.dll included, must carry cargo-auditable's `.dep-v0` section
+#                (scripts/e7-pe-sections.py).
 #   --gui        also builds lpk-gui.exe. Never a bundle: NSIS is never downloaded by this script.
 # Release CI (E7-2) builds with both flags; a developer machine without cargo-auditable uses --gui alone.
 #
@@ -150,20 +150,11 @@ for b in "${bins[@]}"; do
   cp "$rel/$b" "$out/$b"
 done
 if [ "$auditable" = 1 ]; then
-  # cargo-auditable's dependency list, embedded in every shipped exe (fatal if absent). The DLL (a
-  # cdylib only) is reported, never fatal, until CI shows whether cargo-auditable embeds it there.
+  # cargo-auditable's dependency list, embedded in every shipped binary (fatal if absent). The DLL is
+  # held to it too: CI showed cargo-auditable embeds it in the cdylib on both targets (R383).
   # The helper's path goes to the native python as a Windows path (no reliance on argument conversion).
   helper="$(cygpath -m "$root")/scripts/e7-pe-sections.py"
-  exes=()
-  for b in "${bins[@]}"; do
-    [ "$b" = lpk_shell.dll ] || exes+=("$b")
-  done
-  (cd "$out" && python -I "$helper" --require .dep-v0 "${exes[@]}")
-  if (cd "$out" && python -I "$helper" --require .dep-v0 lpk_shell.dll > /dev/null 2>&1); then
-    echo "lpk_shell.dll: .dep-v0 present"
-  else
-    echo "note: lpk_shell.dll carries no .dep-v0 (a cdylib); exempt until CI shows which" >&2
-  fi
+  (cd "$out" && python -I "$helper" --require .dep-v0 "${bins[@]}")
 fi
 (cd "$out" && sha256sum "${bins[@]}" > SHA256SUMS)
 cat "$out/SHA256SUMS"
