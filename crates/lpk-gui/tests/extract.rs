@@ -698,6 +698,44 @@ fn the_check_line_follows_what_the_members_reported() {
     assert_eq!(lpk_gui::extract::check_of(&tar), Some(Check::Unverifiable));
 }
 
+/// E2-19: the folders whose times or attributes the engine could not set reach the page as
+/// `dirsUnset` (the CLI's `DirsUnset` warning); a foreign archive's reader counts none, and a
+/// normal run carries 0 (the page then shows nothing).
+#[test]
+fn the_folders_left_unset_reach_the_page_as_a_count() {
+    use lpk_api::{ExtractSummary, Extracted, ForeignSummary};
+    let lpk = |n| {
+        Extracted::Lpk(ExtractSummary {
+            files: 2,
+            dirs_unset: n,
+            ..ExtractSummary::default()
+        })
+    };
+    assert_eq!(lpk_gui::extract::dirs_unset_of(&lpk(0)), 0);
+    assert_eq!(lpk_gui::extract::dirs_unset_of(&lpk(3)), 3);
+    let zip = Extracted::Foreign(ForeignSummary {
+        format: "zip".into(),
+        files: 2,
+        ..ForeignSummary::default()
+    });
+    assert_eq!(lpk_gui::extract::dirs_unset_of(&zip), 0);
+
+    let d = tempfile::tempdir().unwrap();
+    let a = plain(d.path(), "a.lpk", ENTRIES);
+    let o = open(App::new(None), &a);
+    let mut r = o
+        .run(Dest::NewFolder, Scope::All, Conflict::Refuse)
+        .unwrap();
+    assert_eq!(r.outcome, Outcome::Done);
+    assert_eq!(r.dirs_unset, 0);
+    let json: serde_json::Value = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["dirsUnset"], 0);
+    r.dirs_unset = 2;
+    let json: serde_json::Value = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["dirsUnset"], 2);
+    assert!(json.get("dirs_unset").is_none());
+}
+
 /// An archive of `files` incompressible files of `each` bytes, stored.
 fn big(dir: &Path, files: usize, each: usize) -> PathBuf {
     let src = dir.join("bigsrc");

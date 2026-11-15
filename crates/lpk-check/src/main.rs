@@ -17,7 +17,7 @@ struct Cli {
     /// File holding the password (one trailing newline is stripped).
     #[arg(long, global = true)]
     password_file: Option<PathBuf>,
-    /// Keyfile.
+    /// Keyfile; refused on an archive whose key slot takes none (encrypted with a password alone).
     #[arg(long, global = true)]
     keyfile: Option<PathBuf>,
     /// A prior (repeatable); matched by its BLAKE3.
@@ -147,8 +147,68 @@ fn info(data: Vec<u8>, opts: &Options) -> Result<String, Error> {
     Ok(s)
 }
 
+/// The first bytes of `p`, enough for the header and the key slot's frame.
+fn read_head(p: &Path) -> Result<Vec<u8>, Error> {
+    use std::io::Read;
+    let mut b = Vec::new();
+    std::fs::File::open(p)
+        .and_then(|f| f.take(4096).read_to_end(&mut b))
+        .map_err(|e| Error::io(&format!("read {}", p.display()), &e))?;
+    Ok(b)
+}
+
+/// The refusal of a `--keyfile` on an archive encrypted with a password alone, as `lpk` and
+/// `lpk-decode` refuse it (`UnneededKeyfile`): only the header and the key slot are looked at. A
+/// plain archive, or one whose header or key slot does not parse, passes, and the command
+/// reports it in its own words. A file that cannot be opened or read never gets here: `run`'s
+/// `read_head` fails it first, with the read error the command itself would give. A
+/// command-line rule, not the decoder's: `Archive::open` still ignores a keyfile the slot does
+/// not take, as the specification's opening steps do.
+fn refuse_unneeded_keyfile(archive: &Path, data: &[u8], opts: &Options) -> Result<(), Error> {
+    use lpk_check::wire::{kind, parse_frame, parse_header, HEADER_LEN};
+    if opts.keyfile.is_none() {
+        return Ok(());
+    }
+    if !parse_header(data).is_ok_and(|h| h.encrypted()) {
+        return Ok(());
+    }
+    let Ok(f) = parse_frame(data, HEADER_LEN, lpk_check::crypto::KEY_SLOT_LEN as u64) else {
+        return Ok(());
+    };
+    if f.kind != kind::KEY_SLOT {
+        return Ok(());
+    }
+    match lpk_check::crypto::parse_key_slot(f.payload) {
+        Ok(slot) if !slot.keyfile_required => Err(Error::new(
+            "UnneededKeyfile",
+            format!(
+                "{}: the archive's key slot takes no keyfile; --keyfile is not needed",
+                archive.display()
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The archive a command reads.
+fn archive_of(cmd: &Cmd) -> &Path {
+    match cmd {
+        Cmd::List { archive }
+        | Cmd::Verify { archive }
+        | Cmd::Extract { archive, .. }
+        | Cmd::Check { archive }
+        | Cmd::Info { archive }
+        | Cmd::Repair { archive, .. }
+        | Cmd::Rollback { archive, .. } => archive,
+    }
+}
+
 fn run(cli: &Cli) -> Result<u8, Error> {
     let opts = options(cli)?;
+    if opts.keyfile.is_some() {
+        let archive = archive_of(&cli.cmd);
+        refuse_unneeded_keyfile(archive, &read_head(archive)?, &opts)?;
+    }
     let keyless_encrypted = |data: &[u8]| {
         opts.password.is_none() && lpk_check::wire::parse_header(data).is_ok_and(|h| h.encrypted())
     };

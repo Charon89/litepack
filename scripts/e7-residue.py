@@ -36,23 +36,24 @@ recognises such a registration from the diff's own entries (`packages()`) and ex
 that belong to it, nothing else:
   - the packages F: each family `<name>_<publisher id>` with an added folder
     %LOCALAPPDATA%\\Packages\\<family>, publisher id 8wekyb3d8bbwe or cw5n1h2txyewy (Microsoft's),
-    name not starting with LitePack; with no F the rule excuses nothing;
-  - from the added entries: their full names N (`<name>_<version>_<arch>_<resource>_<id>` as a key
-    path component, family in F), package SIDs S (Mappings keys whose added Moniker is in F), AppX
-    ProgIDs P (HKCU\\Software\\Classes\\AppX<32> whose added Application [AppUserModelID] is
-    `<family>!...`), and app execution aliases A (added reparse points
-    %LOCALAPPDATA%\\Microsoft\\WindowsApps\\<family>\\<alias>);
+    name not containing LitePack; with no F the rule excuses nothing;
+  - from the added entries the last point below does not bar: their full names N
+    (`<name>_<version>_<arch>_<resource>_<id>` as a key path component, family in F), package SIDs
+    S (Mappings keys whose added Moniker is in F), AppX ProgIDs P (HKCU\\Software\\Classes\\AppX<32>
+    whose added Application [AppUserModelID] is `<family>!...`), and app execution aliases A (added
+    reparse points %LOCALAPPDATA%\\Microsoft\\WindowsApps\\<family>\\<alias>);
   - excused, added entries only: a path with a whole component in F, N, S or P, or an app's
-    AppUserModelID `<family>!<app>` (PushNotifications\\Backup); a value named by a P or whose data
-    holds an F or a P; under RegisteredApplications only a value whose data is the path of a
-    package's capabilities, ...\\Repository\\Packages\\<full name in N>\\... (Windows' Default
-    Programs entries of the packages' apps; LitePack's own `LitePack` value stays residue); an
-    alias's reparse point WindowsApps\\<alias> and its CurrentVersion\\App Paths\\<alias> key and values; a URL protocol Classes\\<scheme> holding only
-    `@ = "URL:<scheme>"` and `URL Protocol`, with UrlAssociations\\<scheme> added too (and that
-    partner key, when it holds nothing); an added key every added descendant of which is excused
-    (one at least by this rule) and that has no unexcused value; an added empty key directly under
-    CapabilityAccessManager\\ConsentStore (a package capability's default); and Explorer's marker
-    [PostAppInstallTasksCompleted];
+    AppUserModelID `<family>!<app>` (PushNotifications\\Backup); a value named by a P; under
+    RegisteredApplications only a value whose data is the path of a package's capabilities,
+    ...\\Repository\\Packages\\<full name in N>\\... (Windows' Default Programs entries of the
+    packages' apps; LitePack's own `LitePack` value stays residue); an alias's reparse point
+    WindowsApps\\<alias> and its CurrentVersion\\App Paths\\<alias> key and values; a URL protocol
+    Classes\\<scheme> holding only `@ = "URL:<scheme>"` and `URL Protocol`, with
+    UrlAssociations\\<scheme> added too (and that partner key, when it holds nothing), when a
+    package's own capabilities name the scheme (an added value [<scheme>] under a key with a
+    component in F or N whose path ends in Capabilities\\URLAssociations); an added key every added
+    descendant of which is excused (one at least by this rule) and that has no unexcused value; and
+    Explorer's marker [PostAppInstallTasksCompleted];
   - excused, changed entries, only with F: Explorer\\Package Installation [PackageListVersion],
     Search [InstalledPackagedAppsRevision], and the notification database's write-ahead log and the
     Start menu's and Search's tile model caches;
@@ -136,7 +137,8 @@ WEBVIEW2 = ("the WebView2 runtime's own per-user records, which it keeps for eve
 # shape), `file-changed-pattern` (files of one folder, names of one shape, changed only), `key-pattern-value` (one value name in keys
 # of one shape, a regular expression over the whole key path), `empty-key` (that key alone, added and
 # holding nothing), `file-changed` (that one file, changed only: never added or removed), `key-pattern`
-# (the keys whose whole path matches a regular expression, and their values; not their subkeys). Any
+# (the keys whose whole path matches a regular expression, and their values; not their subkeys),
+# `key-pattern-only` (those keys' existence alone, not their values or subkeys; R373). Any
 # entry may carry `signs`, the signs it may excuse ("+" added, "-" removed, "~" changed); without it,
 # every sign its kind allows. A value-pattern's name may hold `{temp}`: the user's temp folder in its
 # long form (`temp_folder()`).
@@ -196,7 +198,14 @@ ALLOW = [
     {"kind": "key", "path": STORAGE_SENSE,
      "reason": "Windows' Storage Sense, which sets itself up for a user on its own schedule; LitePack writes "
                "nothing under it (R380, CI run 43699094131)"},
-    {"kind": "key-pattern", "path": SHELL_REFRESH, "signs": "+-~",
+    # The numbered keys themselves (`key-pattern-only`; added or removed: a key has no content to
+    # change), and their default value alone (its name is the empty string, printed `@`); any other
+    # value under them stays residue (R373). Both assume LitePack installs no package: revisit them with
+    # the sparse package (E7-5 part 2, E6-3).
+    {"kind": "key-pattern-only", "path": SHELL_REFRESH, "signs": "+-",
+     "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
+               "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
+    {"kind": "key-pattern-value", "path": SHELL_REFRESH, "name": "", "signs": "+-~",
      "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
                "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
     {"kind": "file", "path": r"%LOCALAPPDATA%\D3DSCache",
@@ -630,6 +639,9 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
         if a["kind"] == "key-pattern" and kind in ("key", "value") and \
                 re.fullmatch(a["path"], path, re.IGNORECASE):
             return a["reason"]
+        if a["kind"] == "key-pattern-only" and kind == "key" and \
+                re.fullmatch(a["path"], path, re.IGNORECASE):
+            return a["reason"]
         if a["kind"] == "key-only" and kind == "key" and norm(path) == norm(a["path"]):
             return a["reason"]
         if a["kind"] == "file-pattern" and kind == "file":
@@ -719,7 +731,7 @@ def package_family(leaf):
     name, sep, publisher = leaf.rpartition("_")
     if not sep or not name or "_" in name or norm(publisher) not in MS_PUBLISHERS:
         return None
-    if norm(name).startswith("litepack"):
+    if "litepack" in norm(name):
         return None
     return leaf
 
@@ -731,9 +743,11 @@ def packages(changes, reasons, skip, worker_sids):
     nothing may excuse (an unreadable path)."""
     out = [None] * len(changes)
     added = [(i, c) for i, c in enumerate(changes) if c[0] == "+"]
+    # The entries the sets F, N, S, P and A are built from: rule 5's feed none of them.
+    sources = [(i, c) for i, c in added if not r380_never(c[4], c[1], c[2], c[3], worker_sids)]
     # F: the families with an added folder under %LOCALAPPDATA%\Packages.
     fam = {}
-    for _, (sign, path, name, rec, kind) in added:
+    for _, (sign, path, name, rec, kind) in sources:
         folder, _, leaf = path.rpartition("\\")
         if kind == "file" and rec.get("kind") == "dir" and norm(folder) == norm(PACKAGES_DIR):
             f = package_family(leaf)
@@ -743,7 +757,7 @@ def packages(changes, reasons, skip, worker_sids):
         return out
     # N, S, P and A, each mapped to its family.
     full, sids, progids, aliases = {}, {}, {}, {}
-    for _, (sign, path, name, rec, kind) in added:
+    for _, (sign, path, name, rec, kind) in sources:
         parts = path.split("\\")
         if kind != "file":
             for p in parts:
@@ -772,7 +786,16 @@ def packages(changes, reasons, skip, worker_sids):
              **{k: (v, "a record under its package SID") for k, v in sids.items()},
              **{k: (v, "a record under its AppX ProgID") for k, v in progids.items()}}
     everyone = list(fam.values())
-    keys_added = {norm(c[1]) for _, c in added if c[4] == "key"}
+    # The URL schemes a package's own capabilities name: an added value [<scheme>] under a key with a
+    # component in F or N whose path ends in Capabilities\URLAssociations.
+    declared = {}
+    for _, (sign, path, name, rec, kind) in sources:
+        if kind == "value" and name and norm(path).endswith("\\capabilities\\urlassociations"):
+            f = next((fam.get(norm(p)) or full.get(norm(p)) for p in path.split("\\")
+                      if norm(p) in fam or norm(p) in full), None)
+            if f:
+                declared[norm(name)] = f
+    keys_added ={norm(c[1]) for _, c in added if c[4] == "key"}
 
     def contents(key):
         """The indexes of the added entries strictly inside an added key: its values and subkeys."""
@@ -810,11 +833,6 @@ def packages(changes, reasons, skip, worker_sids):
             if norm(name or "") in progids:
                 out[i] = r380_reason([progids[norm(name)]], "a value named by its AppX ProgID")
                 continue
-            data = norm(rec) if isinstance(rec, str) else ""
-            f = next((v for k, v in {**fam, **progids}.items() if k in data), None)
-            if f:
-                out[i] = r380_reason([f], "a value naming it")
-                continue
             if (norm(path), norm(name or "")) == tuple(norm(x) for x in POST_INSTALL_MARKER):
                 out[i] = r380_reason(everyone, "Explorer's marker of its post app install tasks")
                 continue
@@ -831,7 +849,7 @@ def packages(changes, reasons, skip, worker_sids):
         folder, _, scheme = path.rpartition("\\")
         if kind != "key" or norm(folder) != norm(CLASSES) or i in skip or \
                 r380_never(kind, path, name, rec, worker_sids) or \
-                norm(URL_ASSOCIATIONS + "\\" + scheme) not in keys_added:
+                norm(URL_ASSOCIATIONS + "\\" + scheme) not in keys_added or norm(scheme) not in declared:
             continue
         inside = contents(path)
         values = {norm(changes[j][2] or ""): changes[j][3] for j in inside if changes[j][4] == "value"
@@ -841,20 +859,14 @@ def packages(changes, reasons, skip, worker_sids):
                 any(j in skip or r380_never(*(changes[j][k] for k in (4, 1, 2, 3)), worker_sids)
                     for j in inside):
             continue
-        what = f"the URL protocol {scheme} one of them declares"
+        what = f"the URL protocol {scheme} its capabilities declare"
         for j in [i] + inside:
-            out[j] = r380_reason(everyone, what)
+            out[j] = r380_reason([declared[norm(scheme)]], what)
         partner = next((j for j, c in added if c[4] == "key" and
                         norm(c[1]) == norm(URL_ASSOCIATIONS + "\\" + scheme)), None)
         if partner is not None and partner not in skip and not contents(changes[partner][1]) and \
                 not r380_never("key", changes[partner][1], None, True, worker_sids):
-            out[partner] = r380_reason(everyone, what + ": its association key")
-    # An added empty key directly under ConsentStore: a package capability's default.
-    for i, (sign, path, name, rec, kind) in added:
-        if kind == "key" and out[i] is None and i not in skip and \
-                norm(path.rpartition("\\")[0]) == norm(CONSENT_STORE) and not contents(path) and \
-                not r380_never(kind, path, name, rec, worker_sids):
-            out[i] = r380_reason(everyone, "a package capability's default consent key")
+            out[partner] = r380_reason([declared[norm(scheme)]], what + ": its association key")
     # Parents: an added key all of whose added contents are excused, one at least by this rule (the
     # deepest first, so that a parent of parents sees its subkeys' verdicts).
     parents = sorted((i for i, c in added if c[4] == "key" and out[i] is None and i not in skip and
@@ -1534,6 +1546,9 @@ class Tests(unittest.TestCase):
             ("-", "value", refresh + r"\2", ""),
             ("+", "key", refresh + r"\17", None),
             ("~", "value", refresh + r"\17", ""),
+            # R373: the default value, for each sign.
+            ("+", "value", refresh + r"\17", ""),
+            ("-", "value", refresh + r"\17", ""),
         ]
         for line in lines:
             self.assertIsNotNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
@@ -1549,6 +1564,13 @@ class Tests(unittest.TestCase):
             ("+", "key", refresh + r"\2\Sub", None),
             ("+", "value", refresh + r"\2\Sub", ""),
             ("+", "key", refresh + r"X\2", None),
+            # R373: another value name under a numbered key is residue, whatever its sign.
+            ("+", "value", refresh + r"\17", "Other"),
+            ("-", "value", refresh + r"\17", "Other"),
+            ("~", "value", refresh + r"\17", "Other"),
+            ("+", "value", refresh + r"\17", "@"),
+            # A key has no content to change: `~` on a numbered key is never excused.
+            ("~", "key", refresh + r"\17", None),
         ]
         for line in misses:
             self.assertIsNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
@@ -1680,6 +1702,90 @@ class Tests(unittest.TestCase):
         self.assertTrue(wanted <= residue, sorted(wanted - residue))
         # Everything else of the run stays excused.
         self.assertEqual(residue - wanted, set(), sorted(residue - wanted)[:5])
+
+    def test_r380_a_family_naming_litepack_anywhere_is_refused(self):
+        # R382: not only at the start of the name.
+        for leaf in ("LitePack.App_8wekyb3d8bbwe", "Contoso.LitePack_8wekyb3d8bbwe",
+                     "Contoso.AppLITEPACKx_cw5n1h2txyewy"):
+            self.assertIsNone(package_family(leaf), leaf)
+        self.assertEqual(package_family(self.FB), self.FB)
+        # Such a family alone makes no F: the changes it would excuse stay residue.
+        lines = self.r380_lines(self.R380_FIXTURES[0])
+        alone = [line for line in lines if line.startswith("~ ")]
+        family = [rf"+ dir {PACKAGES_DIR}\Contoso.LitePack_8wekyb3d8bbwe"]
+        self.assertEqual(self.r380_residue(alone + family), set(alone + family))
+
+    def test_r380_barred_entries_feed_no_set(self):
+        # R382: an entry rule 5 bars names a full name or an AppX ProgID; the records that only those
+        # names would excuse stay residue, alongside a registration.
+        lines = self.r380_lines(self.R380_FIXTURES[0])
+        full = "Microsoft.WindowsFeedbackHub_9.9.9.9_x64__8wekyb3d8bbwe"
+        progid = "AppX11111111111111111111111111111111"
+        extra = [
+            # N from a key under HKCU\Software\LitePack; a folder under that full name.
+            rf"+ key HKCU\Software\LitePack\{full}",
+            rf"+ dir %LOCALAPPDATA%\Elsewhere\{full}",
+            # P from an AppUserModelID naming LitePack; the ProgID's key and a value it names.
+            rf"+ key {CLASSES}\{progid}",
+            rf"+ key {CLASSES}\{progid}\Application",
+            rf'+ value {CLASSES}\{progid}\Application [AppUserModelID] = "{self.FB}!LitePack"',
+            rf"+ value {CLASSES}\.fh\OpenWithProgids [{progid}] = hex(0):",
+        ]
+        residue = self.r380_residue(lines + extra)
+        wanted = set(extra) | {rf"+ key {CLASSES}\.fh", rf"+ key {CLASSES}\.fh\OpenWithProgids"}
+        self.assertTrue(wanted <= residue, sorted(wanted - residue))
+        self.assertEqual(residue - wanted, set(), sorted(residue - wanted)[:5])
+
+    def test_r380_a_url_protocol_needs_its_package_capabilities(self):
+        # R382: Classes\<scheme> and UrlAssociations\<scheme> with no package's capabilities naming the
+        # scheme stay residue; the fixtures' own (feedback-hub and others) do not.
+        lines = self.r380_lines(self.R380_FIXTURES[1])
+        caps = (r"HKCU\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel"
+                r"\Repository\Packages\Microsoft.WindowsFeedbackHub_1.2512.16303.0_x64__8wekyb3d8bbwe\App"
+                r"\Capabilities\URLAssociations")
+        self.assertIn(f'+ value {caps} [feedback-hub] = "AppXsbz2fdbdmn6pz7xyd3zc95j9syhcnyc2"', lines)
+        extra = [
+            rf"+ key {CLASSES}\undeclared",
+            rf'+ value {CLASSES}\undeclared [@] = "URL:undeclared"',
+            rf'+ value {CLASSES}\undeclared [URL Protocol] = ""',
+            rf"+ key {URL_ASSOCIATIONS}\undeclared",
+            # Named under a key that is not a package's capabilities.
+            rf"+ key {CLASSES}\elsewhere",
+            rf'+ value {CLASSES}\elsewhere [@] = "URL:elsewhere"',
+            rf'+ value {CLASSES}\elsewhere [URL Protocol] = ""',
+            rf"+ key {URL_ASSOCIATIONS}\elsewhere",
+            r"+ key HKCU\Software\Other\Capabilities\URLAssociations",
+            r'+ value HKCU\Software\Other\Capabilities\URLAssociations [elsewhere] = "x"',
+        ]
+        residue = self.r380_residue(lines + extra)
+        self.assertEqual(residue, set(extra))
+        # Without the package's capabilities value, its own scheme stays residue.
+        mine = [rf"+ key {CLASSES}\feedback-hub", rf"+ key {URL_ASSOCIATIONS}\feedback-hub"]
+        for line in mine:
+            self.assertIn(line, lines)
+        bare = [line for line in lines if not line.startswith(f"+ value {caps} [feedback-hub]")]
+        self.assertTrue(set(mine) <= self.r380_residue(bare))
+
+    def test_r380_near_misses_stay_residue(self):
+        lines = self.r380_lines(self.R380_FIXTURES[0])
+        other = "Contoso.Other_8wekyb3d8bbwe"
+        extra = [
+            # The RegisteredApplications key itself, not only a value.
+            r"+ key HKCU\Software\RegisteredApplications",
+            # A Mappings SID key whose Moniker names LitePack's worker profile, and its values.
+            rf"+ key {MAPPINGS}\S-1-15-2-7-7-7",
+            rf'+ value {MAPPINGS}\S-1-15-2-7-7-7 [Moniker] = "LitePack.Worker"',
+            rf'+ value {MAPPINGS}\S-1-15-2-7-7-7 [DisplayName] = "{self.FB}"',
+            rf"+ key {MAPPINGS}\S-1-15-2-7-7-7\Children",
+            # An alias under a family not in F, and what it would name.
+            rf"+ reparse {WINDOWS_APPS}\{other}\other.exe",
+            rf"+ reparse {WINDOWS_APPS}\other.exe",
+            rf"+ key {APP_PATHS}\other.exe",
+            rf'+ value {APP_PATHS}\other.exe [@] = "x"',
+        ]
+        residue = self.r380_residue(lines + extra)
+        self.assertTrue(set(extra) <= residue, sorted(set(extra) - residue))
+        self.assertEqual(residue - set(extra), set(), sorted(residue - set(extra))[:5])
 
     def test_r380_changes_and_the_marker_need_a_package(self):
         lines = self.r380_lines(self.R380_FIXTURES[0])

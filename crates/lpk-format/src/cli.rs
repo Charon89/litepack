@@ -37,7 +37,8 @@ struct Cli {
     /// A file holding the password; one trailing newline is not part of it.
     #[arg(long, global = true, value_name = "PATH")]
     password_file: Option<PathBuf>,
-    /// The keyfile of an archive that uses one as a second factor.
+    /// The keyfile of an archive that uses one as a second factor; refused (exit 1) on an
+    /// archive encrypted with a password alone.
     #[arg(long, global = true, value_name = "PATH")]
     keyfile: Option<PathBuf>,
     /// The decode memory limit in bytes (the reader's `Resources::memory`;
@@ -625,12 +626,36 @@ where
             return 1;
         }
     };
+    if cli.keyfile.is_some() {
+        if let Some(refusal) = unneeded_keyfile(cli.command.archive()) {
+            let _ = writeln!(err, "error: {refusal}");
+            return 1;
+        }
+    }
     match run_command(&cli.command, &cli.priors, &keys, out) {
         Ok(()) => 0,
         Err(e) => {
             let _ = writeln!(err, "error: {e}");
             1
         }
+    }
+}
+
+/// The refusal of a `--keyfile` on an archive encrypted with a password alone, as `lpk` refuses
+/// it (`UnneededKeyfile`): only the header and the key slot are read. A plain archive, or one
+/// whose header or key slot cannot be read, passes, and the command reports it.
+fn unneeded_keyfile(archive: &Path) -> Option<String> {
+    let mut file = File::open(archive).ok()?;
+    let header = crate::Header::read(&mut file).ok()?;
+    if !header.flags.contains(crate::HeaderFlags::ENCRYPTED) {
+        return None;
+    }
+    match crate::read_key_slot(&mut file) {
+        Ok((slot, _)) if !slot.keyfile_required => Some(format!(
+            "{}: the archive's key slot takes no keyfile; --keyfile is not needed",
+            archive.display()
+        )),
+        _ => None,
     }
 }
 

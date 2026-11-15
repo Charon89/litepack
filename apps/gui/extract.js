@@ -182,6 +182,12 @@ export function createExtractor(env) {
     if (r.motwUnmarked) {
       nodes.push(el("p", { text: t("extract.motw") }));
     }
+    // E2-19: folders whose times or attributes could not be set (the CLI's warning); 0 says nothing.
+    if (r.dirsUnset === 1) {
+      nodes.push(el("p", { text: t("extract.dirsunset.one") }));
+    } else if (r.dirsUnset > 1) {
+      nodes.push(el("p", { text: t("extract.dirsunset.other", { count: count(r.dirsUnset) }) }));
+    }
     // No check line without a written file, and none for a cancelled run.
     const kind = r.check ? r.check.kind : null;
     if (kind === "blake3") {
