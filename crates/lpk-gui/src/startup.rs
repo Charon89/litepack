@@ -17,15 +17,22 @@ pub const WEBVIEW_RETRY_FOR: Duration = Duration::from_secs(10);
 /// The whole window of retries while the user data folder is in use (R358): the old instance's
 /// WebView2 browser process can hold it for more than 10 s after that instance has gone.
 pub const WEBVIEW_IN_USE_RETRY_FOR: Duration = Duration::from_secs(30);
-/// `ERROR_BUSY` as an HRESULT ("The requested resource is in use."): the code is the same in
-/// every language, the text is not.
-pub const IN_USE_HRESULT: &str = "0x800700AA";
+/// The HRESULTs that mean the user data folder is still in use: another process (the old
+/// instance's WebView2 browser) holds the folder or its files. The codes are the same in every
+/// language, the text is not.
+/// - `0x800700AA`, `ERROR_BUSY` ("The requested resource is in use.", R358);
+/// - `0x80070020`, `ERROR_SHARING_VIOLATION` (a file of the folder is open in another process);
+/// - `0x80070021`, `ERROR_LOCK_VIOLATION` (a part of a file of the folder is locked by another
+///   process).
+pub const IN_USE_HRESULTS: [&str; 3] = ["0x800700AA", "0x80070020", "0x80070021"];
 
-/// Whether `error` (a failed try's text) is the user data folder still in use.
+/// Whether `error` (a failed try's text) is the user data folder still in use: it names one of
+/// [`IN_USE_HRESULTS`], in either case.
 pub fn in_use(error: &str) -> bool {
-    error
-        .to_ascii_uppercase()
-        .contains(&IN_USE_HRESULT.to_ascii_uppercase())
+    let error = error.to_ascii_uppercase();
+    IN_USE_HRESULTS
+        .iter()
+        .any(|code| error.contains(&code.to_ascii_uppercase()))
 }
 
 /// Whether the main webview is tried again after a try failed with `error`, `spent` after the
@@ -311,6 +318,61 @@ mod tests {
         assert!(webview_retry("another error", Duration::from_millis(9_500)));
         assert!(!webview_retry("another error", Duration::from_secs(10)));
         assert!(!webview_retry("another error", Duration::from_secs(11)));
+    }
+
+    const SHARING: &str = "HRESULT(0x80070020) The process cannot access the file because it is being used by another process.";
+    const LOCK: &str = "HRESULT(0x80070021) The process cannot access the file because another process has locked a portion of the file.";
+
+    #[test]
+    fn sharing_and_lock_violations_are_in_use_too() {
+        for (code, text) in [
+            ("0x800700AA", BUSY),
+            ("0x80070020", SHARING),
+            ("0x80070021", LOCK),
+        ] {
+            assert!(IN_USE_HRESULTS.contains(&code));
+            assert!(in_use(text), "{code}");
+            assert!(
+                in_use(&format!("hresult({})", code.to_ascii_lowercase())),
+                "{code}"
+            );
+            assert!(
+                in_use(&format!("HRESULT({})", code.to_ascii_uppercase())),
+                "{code}"
+            );
+            // The 30 s bound, not the 10 s one.
+            assert!(webview_retry(text, Duration::from_secs(12)), "{code}");
+            assert!(webview_retry(text, Duration::from_millis(29_500)), "{code}");
+            assert!(!webview_retry(text, Duration::from_secs(30)), "{code}");
+        }
+        // Neighbouring and other codes are not.
+        for other in [
+            "HRESULT(0x80070005) Access is denied.",
+            "HRESULT(0x8007001F)",
+            "HRESULT(0x80070022)",
+            "HRESULT(0x800700AB)",
+            "HRESULT(0x80004005) Unspecified error",
+            "another error",
+        ] {
+            assert!(!in_use(other), "{other}");
+            assert!(!webview_retry(other, Duration::from_secs(10)), "{other}");
+        }
+    }
+
+    #[test]
+    fn each_in_use_code_switches_after_2_s() {
+        for text in [BUSY, SHARING, LOCK] {
+            // The primary fails with `text`, the alternate opens.
+            let (used, ended) = run(|f, _| (f == WebviewFolder::Primary).then(|| in_use(text)));
+            assert!(!ended, "{text}");
+            let mut want = vec![WebviewFolder::Primary; 5];
+            want.push(WebviewFolder::Alternate);
+            assert_eq!(used, want, "{text}");
+            // Both fail with `text` for the whole 30 s.
+            let (used, ended) = run(|_, _| Some(in_use(text)));
+            assert!(ended, "{text}");
+            assert_eq!(used.len(), 61, "{text}");
+        }
     }
 
     #[test]
