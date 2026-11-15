@@ -8,7 +8,8 @@ installers and the portable and CLI zip of each architecture (names from scripts
     python -I scripts/e7-artefacts.py --self-test [--sevenzip <7z.exe>]
 
 `notices` and `pes` first require `<dir>` to hold exactly e7-assets.py's expected names for `<v>` and SHA256SUMS,
-nothing else.
+nothing else; they then look inside the six artefacts (e7-assets.py's `artefacts`) only, not inside the SBOM zip
+(E7-2 part 1d), which holds no PE and no notices and is checked by scripts/e7-sboms.py.
 
 `notices` (E7-8 part 2, the notices finder): each artefact holds THIRD-PARTY-NOTICES, LICENSE-APACHE and LICENSE-MIT
 exactly once each, at its top folder (`LitePack/` in a zip, the root as 7-Zip lists it in an installer), byte-equal to
@@ -32,7 +33,9 @@ classified, and anything that fits no class fails:
   `EF BE AD DE` `NullsoftInst`), at least 0x200, and the installer's [0, S) must be an MZ PE. The uninstaller carries
   its own first header at S with FH_FLAGS_UNINSTALL (1) set in its flags (clear in the installer's), the installer's
   section table, and the installer's bytes [0, S) everywhere but inside `.rsrc` (its icon) and the PE CheckSum field
-  (R391). Both flags words and each differing byte range, with its section, are printed.
+  (R391). Both flags words are printed, and per part of the stub (a section, the headers, the CheckSum) one line
+  with its count of differing ranges and bytes and its first and last range; every range outside .rsrc and the
+  CheckSum (each one a failure) is also printed in full (R393).
 It prints each PE with its class, machine and SHA-256, a count per class, and 7-Zip's full listing of each installer
 once.
 
@@ -124,9 +127,11 @@ class Artefact:
 
 def find_artefacts(folder, version):
     """The six artefacts in `folder` as (path, arch, kind). Fails unless `folder` holds exactly e7-assets.py's expected
-    names for `version` and, optionally, SHA256SUMS."""
+    names for `version` and, optionally, SHA256SUMS. The SBOM zip is one of those names but not an artefact (it holds
+    no PE and no notices; scripts/e7-sboms.py checks it): only e7-assets.py's `artefacts` are returned."""
     try:
         names = assets.expected(version)
+        arts = assets.artefacts(version)
     except assets.AssetError as e:
         raise Fail(str(e))
     present = sorted(p.name for p in Path(folder).iterdir())
@@ -135,15 +140,17 @@ def find_artefacts(folder, version):
     if errors:
         raise Fail(f"{folder}: " + "; ".join(errors))
     out = []
-    for n in names:
+    for n in arts:
         m = INSTALLER_RE.match(n)
         if m:
             out.append((Path(folder) / n, m["arch"], "installer"))
         else:
             m = ZIP_RE.match(n)
+            if not m:
+                raise Fail(f"{n}: an artefact name that is neither an installer's nor a zip's")
             out.append((Path(folder) / n, m["arch"], m["kind"]))
     if sorted((a, k) for _, a, k in out) != sorted((a, k) for a in MACHINE for k in HOLDS):
-        raise Fail(f"the expected names do not give one artefact of each kind and architecture: {names}")
+        raise Fail(f"the expected names do not give one artefact of each kind and architecture: {arts}")
     return out
 
 
@@ -388,6 +395,24 @@ def differing_ranges(a, b):
     return runs
 
 
+# The parts of the stub where the uninstaller may differ from its installer (R391).
+ALLOWED_DIFF = (".rsrc", "CheckSum")
+
+
+def by_part(ranges, stub):
+    """[(part, [(start, end)])] of the differing ranges, each split where the stub's part changes, one entry per part
+    in the order of its first range (R393: one summary line per part)."""
+    parts = {}
+    for start, end in ranges:
+        b, cur = start, stub.where(start)
+        for o in range(start + 1, end + 1):
+            w = stub.where(o) if o < end else None
+            if w != cur:
+                parts.setdefault(cur, []).append((b, o))
+                b, cur = o, w
+    return list(parts.items())
+
+
 def uninstaller_check(data, stub):
     """(notes, problems) of an uninstaller's bytes against its installer's Stub: its own first header at the same S
     with NSIS's FH_FLAGS_UNINSTALL set (clear in the installer's), the same section table, and [0, S) equal to the
@@ -418,10 +443,14 @@ def uninstaller_check(data, stub):
         problems.append(f"shorter than the installer's stub ({len(head):#x} bytes, not {s:#x})")
         return notes, problems
     outside = []
-    for start, end in differing_ranges(head, stub.bytes):
-        parts = sorted({stub.where(o) for o in range(start, end)})
-        notes.append(f"differs from the installer's stub at [{start:#x}, {end:#x}) in {', '.join(parts)}")
-        outside += [p for p in parts if p not in (".rsrc", "CheckSum")]
+    for part, runs in by_part(differing_ranges(head, stub.bytes), stub):
+        n = sum(e - b for b, e in runs)
+        notes.append(f"differs from the installer's stub in {part}: {len(runs)} range{'s' if len(runs) != 1 else ''}, "
+                     f"{n} byte{'s' if n != 1 else ''}, first [{runs[0][0]:#x}, {runs[0][1]:#x}), "
+                     f"last [{runs[-1][0]:#x}, {runs[-1][1]:#x})")
+        if part not in ALLOWED_DIFF:
+            outside.append(part)
+            notes += [f"differs from the installer's stub at [{b:#x}, {e:#x}) in {part}" for b, e in runs]
     notes.append(f"[0, {s:#x}) equal to the installer's stub apart from .rsrc and CheckSum: "
                  + ("no" if outside else "yes"))
     if outside:
@@ -803,14 +832,35 @@ def self_test(sevenzip=None):
         icon = patch(uninst, 0x310, b"ICON")
         r = cls("uninstall.exe", icon)
         ok("installer: a difference inside .rsrc passes", r[3] == [] and
-           "differs from the installer's stub at [0x310, 0x314) in .rsrc" in r[4])
+           "differs from the installer's stub in .rsrc: 1 range, 4 bytes, first [0x310, 0x314), last [0x310, 0x314)"
+           in r[4] and not any(" at [" in n for n in r[4]))
         r = cls("uninstall.exe", patch(icon, checksum, b"\x12\x34\x56\x78"))
         ok("installer: a different CheckSum passes", r[3] == [] and
-           f"differs from the installer's stub at [{checksum:#x}, {checksum + 4:#x}) in CheckSum" in r[4])
+           f"differs from the installer's stub in CheckSum: 1 range, 4 bytes, first [{checksum:#x}, {checksum + 4:#x}), "
+           f"last [{checksum:#x}, {checksum + 4:#x})" in r[4])
         r = cls("uninstall.exe", patch(uninst, 0x250, b"\xff"))
         ok("installer: a difference in .text fails", r[3] == [
             "differs from the installer's stub outside .rsrc and CheckSum (.text)"] and
            "differs from the installer's stub at [0x250, 0x251) in .text" in r[4])
+        # R393: many ranges in .rsrc, the CheckSum, and two in .text (one running on into .rsrc): one summary line per
+        # part, each part named once, the .rsrc ranges not listed, the .text ones in full; the verdict line unchanged.
+        many = patch(uninst, checksum, b"\x12\x34\x56\x78")
+        for o in range(0x320, 0x3F0, 4):
+            many = patch(many, o, b"I")
+        many = patch(patch(many, 0x240, b"\xfe\xfe"), 0x2FE, bytes(4))
+        r = cls("uninstall.exe", many)
+        summaries = [n for n in r[4] if n.startswith("differs from the installer's stub in ")]
+        named = [n.split(" in ", 1)[1].split(":", 1)[0] for n in summaries]
+        ok("installer: the summary names each part once", sorted(named) == sorted({"CheckSum", ".text", ".rsrc"})
+           and len(named) == len(set(named)))
+        ok("installer: the .rsrc summary counts its ranges and bytes", "differs from the installer's stub in .rsrc: "
+           "53 ranges, 54 bytes, first [0x300, 0x302), last [0x3ec, 0x3ed)" in r[4])
+        ok("installer: only the ranges outside .rsrc and CheckSum are listed in full",
+           [n for n in r[4] if " at [" in n] == ["differs from the installer's stub at [0x240, 0x242) in .text",
+                                                 "differs from the installer's stub at [0x2fe, 0x300) in .text"])
+        ok("installer: the verdict line stays", r[4][-1] ==
+           "[0, 0x400) equal to the installer's stub apart from .rsrc and CheckSum: no" and r[3] == [
+               "differs from the installer's stub outside .rsrc and CheckSum (.text)"])
         r = cls("uninstall.exe", patch(uninst, 0x100, b"\x01"))
         ok("installer: a difference in the headers fails", r[3] == [
             "differs from the installer's stub outside .rsrc and CheckSum (headers)"])
@@ -904,7 +954,11 @@ def self_test(sevenzip=None):
         for arch in MACHINE:
             (good / f"LitePack_0.1.0_{arch}-setup.exe").write_bytes(b"MZ")
         (good / "SHA256SUMS").write_bytes(b"")
-        ok("find_artefacts: the six and SHA256SUMS", finds(good) == 6)
+        ok("find_artefacts: without the SBOM zip fails", "missing: litepack-0.1.0-sbom.zip" in str(finds(good)))
+        (good / "litepack-0.1.0-sbom.zip").write_bytes(b"PK")
+        found = find_artefacts(good, "0.1.0")
+        ok("find_artefacts: the seven and SHA256SUMS give the six artefacts, not the SBOM zip", len(found) == 6
+           and all(not p.name.endswith("-sbom.zip") for p, _, _ in found))
         ok("find_artefacts: another version's names fail", "missing" in str(finds(good, "0.2.0")))
         (good / "notes.txt").write_bytes(b"x")
         ok("find_artefacts: an extra file fails", "not an expected asset: notes.txt" in str(finds(good)))

@@ -8,8 +8,10 @@ name: Release
 # deployment target, no stored credential, no OIDC token, no cache (part 2 adds signing and publishing). Part 1c adds
 # the release's assets: both zips per architecture beside the installers, SHA256SUMS, the notices finder and the
 # classification of every PE inside them (assemble), and a smoke run of the zips on both architectures (smoke-x64,
-# smoke-arm64); parts 1d and 1e add the SBOMs and the install checks with the residue diff. Every action is pinned by
-# its commit SHA, the tag in a comment; the preflight job checks this file for that (scripts/e7-preflight.py workflow).
+# smoke-arm64). Part 1d adds one CycloneDX SBOM per shipped binary (made by the build jobs, packed by assemble into
+# the seventh asset, litepack-<v>-sbom.zip); part 1e adds the install checks with the residue diff. Every action is
+# pinned by its commit SHA, the tag in a comment; the preflight job checks this file for that
+# (scripts/e7-preflight.py workflow).
 on:
   pull_request:
     paths:
@@ -77,8 +79,8 @@ jobs:
       - name: This workflow's pins and permissions
         run: python -I scripts/e7-preflight.py workflow .github/workflows/release.yml
 
-  # tauri-cli and cargo-auditable at the versions of scripts/release-tools.env, built once and handed to every later
-  # job with their SHA-256 list; the list's own hash is this job's output, so a later job checks both.
+  # tauri-cli, cargo-auditable and cargo-cyclonedx at the versions of scripts/release-tools.env, built once and handed
+  # to every later job with their SHA-256 list; the list's own hash is this job's output, so a later job checks both.
   tools:
     name: build tools (windows-2025)
     runs-on: windows-2025
@@ -94,21 +96,24 @@ jobs:
         run: |
           rustup toolchain install --no-self-update
           rustc --version
-      - name: cargo install tauri-cli and cargo-auditable (scripts/release-tools.env)
+      - name: cargo install tauri-cli, cargo-auditable and cargo-cyclonedx (scripts/release-tools.env)
         run: |
           set -euo pipefail
           source scripts/release-tools.env
           root="$(cygpath -u "$RUNNER_TEMP")/tools"
           cargo install --locked --root "$root" --version "=$TAURI_CLI_VERSION" tauri-cli
           cargo install --locked --root "$root" --version "=$CARGO_AUDITABLE_VERSION" cargo-auditable
+          cargo install --locked --root "$root" --version "=$CARGO_CYCLONEDX_VERSION" cargo-cyclonedx
           PATH="$root/bin:$PATH" cargo tauri --version
           PATH="$root/bin:$PATH" cargo auditable --version
+          PATH="$root/bin:$PATH" cargo cyclonedx --version
       - name: tools.sha256
         id: list
         run: |
           cd "$(cygpath -u "$RUNNER_TEMP")/tools/bin"
           ls -la
-          sha256sum cargo-tauri.exe cargo-auditable.exe > tools.sha256
+          sha256sum cargo-tauri.exe cargo-auditable.exe cargo-cyclonedx.exe > tools.sha256
+          test "$(wc -l < tools.sha256)" = 3
           cat tools.sha256
           echo "sha256=$(sha256sum tools.sha256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -119,7 +124,9 @@ jobs:
           if-no-files-found: error
 
   # The two build jobs: one script (scripts/e7-release-build.sh), two named jobs so that each can output the hash of
-  # its own unsigned.sha256 (a matrix's legs cannot have separate outputs).
+  # its own unsigned.sha256 and of its sboms.sha256 (a matrix's legs cannot have separate outputs). The artifact also
+  # holds sboms/, the six SBOMs (part 1d), listed in sboms.sha256: a second list, so that unsigned.sha256 stays the
+  # list of the six PEs that package, install-arm64 and assemble read line by line.
   build-x64:
     name: build x64 (windows-2025)
     needs: [preflight, tools]
@@ -127,6 +134,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       list: ${{ steps.list.outputs.sha256 }}
+      sboms: ${{ steps.list.outputs.sboms }}
     defaults:
       run:
         shell: bash
@@ -151,14 +159,22 @@ jobs:
           test "$(sha256sum tools.sha256 | cut -d ' ' -f 1)" = "$TOOLS_LIST" || { echo "tools.sha256 is not the tools job's"; exit 1; }
           sha256sum -c tools.sha256
           cygpath -w "$PWD" >> "$GITHUB_PATH"
-      - name: Build the six shipped PEs (scripts/e7-release-build.sh x64)
+      - name: Build the six shipped PEs and their SBOMs (scripts/e7-release-build.sh x64)
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
+          test -n "$VERSION"
           cargo tauri --version
           cargo auditable --version
-          bash scripts/e7-release-build.sh x64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64"
-      - name: The hash of unsigned.sha256
+          cargo cyclonedx --version
+          python -I scripts/e7-sboms.py --self-test
+          bash scripts/e7-release-build.sh x64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64" "$VERSION"
+      - name: The hashes of unsigned.sha256 and sboms.sha256
         id: list
-        run: echo "sha256=$(sha256sum "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64/unsigned.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+        run: |
+          d="$(cygpath -u "$RUNNER_TEMP")/unsigned-x64"
+          echo "sha256=$(sha256sum "$d/unsigned.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "sboms=$(sha256sum "$d/sboms.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-x64
@@ -173,6 +189,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       list: ${{ steps.list.outputs.sha256 }}
+      sboms: ${{ steps.list.outputs.sboms }}
     defaults:
       run:
         shell: bash
@@ -198,14 +215,22 @@ jobs:
           test "$(sha256sum tools.sha256 | cut -d ' ' -f 1)" = "$TOOLS_LIST" || { echo "tools.sha256 is not the tools job's"; exit 1; }
           sha256sum -c tools.sha256
           cygpath -w "$PWD" >> "$GITHUB_PATH"
-      - name: Build the six shipped PEs (scripts/e7-release-build.sh arm64)
+      - name: Build the six shipped PEs and their SBOMs (scripts/e7-release-build.sh arm64)
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
+          test -n "$VERSION"
           cargo tauri --version
           cargo auditable --version
-          bash scripts/e7-release-build.sh arm64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64"
-      - name: The hash of unsigned.sha256
+          cargo cyclonedx --version
+          python -I scripts/e7-sboms.py --self-test
+          bash scripts/e7-release-build.sh arm64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64" "$VERSION"
+      - name: The hashes of unsigned.sha256 and sboms.sha256
         id: list
-        run: echo "sha256=$(sha256sum "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64/unsigned.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+        run: |
+          d="$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64"
+          echo "sha256=$(sha256sum "$d/unsigned.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "sboms=$(sha256sum "$d/sboms.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-arm64
@@ -489,10 +514,12 @@ jobs:
           echo "uninstalled: $INST is gone"
 
   # The release's assets (part 1c): the portable and CLI zip of each architecture (scripts/make-zips.py, from the build
-  # jobs' binaries) beside the two installers, and SHA256SUMS over the six (scripts/e7-assets.py). Then what is inside
-  # them: each holds the notices and both licences once, byte-equal to the repository's (E7-8 part 2), and every PE
-  # inside is either a shipped one of its architecture with .dep-v0, byte-equal to the build's, or one of NSIS's own
-  # x86 parts (scripts/e7-artefacts.py). The job's output is the hash of SHA256SUMS, which the smoke jobs check.
+  # jobs' binaries) beside the two installers, the SBOM zip (part 1d: scripts/e7-sboms.py pack, from the build jobs'
+  # sboms/), and SHA256SUMS over the seven (scripts/e7-assets.py). Then what is inside the six artefacts (the SBOM zip
+  # aside: e7-sboms.py check reads it): each holds the notices and both licences once, byte-equal to the repository's
+  # (E7-8 part 2), and every PE inside is either a shipped one of its architecture with .dep-v0, byte-equal to the
+  # build's, or one of NSIS's own x86 parts (scripts/e7-artefacts.py). The job's output is the hash of SHA256SUMS,
+  # which the smoke jobs check.
   assemble:
     name: release assets (windows-2025)
     needs: [preflight, build-x64, build-arm64, package]
@@ -537,6 +564,8 @@ jobs:
         env:
           X64_LIST: ${{ needs.build-x64.outputs.list }}
           ARM64_LIST: ${{ needs.build-arm64.outputs.list }}
+          X64_SBOMS: ${{ needs.build-x64.outputs.sboms }}
+          ARM64_SBOMS: ${{ needs.build-arm64.outputs.sboms }}
           INSTALLERS_LIST: ${{ needs.package.outputs.list }}
         run: |
           set -euo pipefail
@@ -549,14 +578,19 @@ jobs:
           }
           check "$T/unsigned-x64" unsigned.sha256 "$X64_LIST"
           check "$T/unsigned-arm64" unsigned.sha256 "$ARM64_LIST"
+          check "$T/unsigned-x64" sboms.sha256 "$X64_SBOMS"
+          check "$T/unsigned-arm64" sboms.sha256 "$ARM64_SBOMS"
           check "$T/installers" installers.sha256 "$INSTALLERS_LIST"
           test "$(wc -l < "$T/unsigned-x64/unsigned.sha256")" = 6
           test "$(wc -l < "$T/unsigned-arm64/unsigned.sha256")" = 6
+          test "$(wc -l < "$T/unsigned-x64/sboms.sha256")" = 6
+          test "$(wc -l < "$T/unsigned-arm64/sboms.sha256")" = 6
           test "$(wc -l < "$T/installers/installers.sha256")" = 3
           grep -q ' \*\?nsis-parts.sha256$' "$T/installers/installers.sha256"
-      - name: The asset, notices, PE and zip scripts' own tests
+      - name: The asset, notices, PE, SBOM and zip scripts' own tests
         run: |
           python -I scripts/make-zips.py --self-test
+          python -I scripts/e7-sboms.py --self-test
           python -I scripts/e7-assets.py --self-test
           python -I scripts/e7-artefacts.py --self-test --sevenzip "$SZ"
       - name: Both zips per architecture, and the two installers
@@ -573,6 +607,13 @@ jobs:
           done < "$T/installers/installers.sha256"
           for z in "$T/assets/"*.zip; do python -I -m zipfile -l "$z"; done
           ls -la "$T/assets"
+      - name: The SBOM zip (scripts/e7-sboms.py pack, then check)
+        run: |
+          set -euo pipefail
+          python -I scripts/e7-sboms.py pack --version "$VERSION" --timestamp "$TIMESTAMP" \
+            --x64 "$T/unsigned-x64/sboms" --arm64 "$T/unsigned-arm64/sboms" --out "$T/assets"
+          python -I scripts/e7-sboms.py check "$T/assets/litepack-$VERSION-sbom.zip"
+          python -I -m zipfile -l "$T/assets/litepack-$VERSION-sbom.zip"
       - name: SHA256SUMS over exactly the expected assets
         id: sums
         run: |
@@ -632,7 +673,7 @@ jobs:
           test -n "$SUMS"
           test "$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" = "$SUMS" || { echo "SHA256SUMS is not the assemble job's"; exit 1; }
           (cd "$T/assets" && sha256sum -c SHA256SUMS)
-          test "$(wc -l < "$T/assets/SHA256SUMS")" = 6
+          test "$(wc -l < "$T/assets/SHA256SUMS")" = 7
       # Windows' own tar.exe (bsdtar) reads zips: the same unzip on both runners, without Python.
       - name: Unzip the CLI and portable zips of this architecture
         run: |
@@ -719,7 +760,7 @@ jobs:
           test -n "$SUMS"
           test "$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" = "$SUMS" || { echo "SHA256SUMS is not the assemble job's"; exit 1; }
           (cd "$T/assets" && sha256sum -c SHA256SUMS)
-          test "$(wc -l < "$T/assets/SHA256SUMS")" = 6
+          test "$(wc -l < "$T/assets/SHA256SUMS")" = 7
       - name: Unzip the CLI and portable zips of this architecture
         run: |
           set -euo pipefail

@@ -7,7 +7,9 @@
 
 `expected`: the asset names, one per line, sorted: the two NSIS installers as the Tauri bundler names them
 (`<productName>_<v>_<arch>-setup.exe`, productName from crates/lpk-gui/tauri.conf.json) and the portable and CLI zip
-of each architecture as scripts/make-zips.py names them (`litepack-<v>-windows-<arch>-{portable,cli}.zip`).
+of each architecture as scripts/make-zips.py names them (`litepack-<v>-windows-<arch>-{portable,cli}.zip`), and
+the SBOM zip as scripts/e7-sboms.py names it (`litepack-<v>-sbom.zip`, E7-2 part 1d): seven names. The first six are
+the artefacts (`artefacts()`, what scripts/e7-artefacts.py looks inside); the SBOM zip holds no PE and no notices.
 
 `sums`: writes `<dir>/SHA256SUMS` in `sha256sum`'s text format (`<hex>  <name>`, LF line ends, sorted by name) over
 exactly the expected names. It fails, writing nothing, when an expected file is missing or `<dir>` holds any other
@@ -39,8 +41,8 @@ class AssetError(Exception):
     pass
 
 
-def expected(version):
-    """The asset names of version `version`, sorted."""
+def artefacts(version):
+    """The six artefacts of version `version` (the installers and the zips that ship the binaries), sorted."""
     if not VERSION_RE.fullmatch(version):
         raise AssetError(f"unusable version {version!r}")
     names = []
@@ -49,6 +51,18 @@ def expected(version):
         stem = f"{ZIP_PRODUCT}-{version}-windows-{arch}"
         names += [f"{stem}-portable.zip", f"{stem}-cli.zip"]
     return sorted(names)
+
+
+def sbom_name(version):
+    """The SBOM zip's name (scripts/e7-sboms.py pack writes it)."""
+    if not VERSION_RE.fullmatch(version):
+        raise AssetError(f"unusable version {version!r}")
+    return f"{ZIP_PRODUCT}-{version}-sbom.zip"
+
+
+def expected(version):
+    """The asset names of version `version`, sorted: the six artefacts and the SBOM zip."""
+    return sorted(artefacts(version) + [sbom_name(version)])
 
 
 def sha256(path):
@@ -155,11 +169,14 @@ def self_test():
         return False
 
     names = expected("0.1.0")
-    ok("six names, sorted", names == sorted(names) and len(names) == 6)
+    ok("seven names, sorted", names == sorted(names) and len(names) == 7)
     ok("the exact names", names == [
-        "LitePack_0.1.0_arm64-setup.exe", "LitePack_0.1.0_x64-setup.exe",
+        "LitePack_0.1.0_arm64-setup.exe", "LitePack_0.1.0_x64-setup.exe", "litepack-0.1.0-sbom.zip",
         "litepack-0.1.0-windows-arm64-cli.zip", "litepack-0.1.0-windows-arm64-portable.zip",
         "litepack-0.1.0-windows-x64-cli.zip", "litepack-0.1.0-windows-x64-portable.zip"])
+    ok("the six artefacts: all but the SBOM zip", artefacts("0.1.0") == [n for n in names if not n.endswith("-sbom.zip")]
+       and len(artefacts("0.1.0")) == 6)
+    ok("a bad version is refused by sbom_name", raises(sbom_name, "a b", contains="unusable version"))
     ok("a bad version is refused", raises(expected, "../x", contains="unusable version"))
 
     # The names agree with the code that writes the files: make-zips.py's zip_names and tauri.conf.json's productName.
@@ -169,6 +186,10 @@ def self_test():
     spec.loader.exec_module(mz)
     for arch in ARCHES:
         ok(f"make-zips.py names the {arch} zips the same", all(n in names for n in mz.zip_names("0.1.0", arch)))
+    spec = importlib.util.spec_from_file_location("e7_sboms", repo / "scripts" / "e7-sboms.py")
+    sb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sb)
+    ok("e7-sboms.py names the SBOM zip the same", sb.zip_name("0.1.0") == sbom_name("0.1.0"))
     conf = json.loads((repo / "crates" / "lpk-gui" / "tauri.conf.json").read_text(encoding="utf-8"))
     ok("the installers' prefix is tauri.conf.json's productName", conf["productName"] == INSTALLER_PRODUCT)
 
@@ -183,11 +204,11 @@ def self_test():
 
         a = fill(d / "a")
         text = sums("0.1.0", a)
-        ok("SHA256SUMS: six LF lines, sorted, two spaces", text.count("\n") == 6 and "\r" not in text
+        ok("SHA256SUMS: seven LF lines, sorted, two spaces", text.count("\n") == 7 and "\r" not in text
            and [l.split("  ")[1] for l in text.splitlines()] == names)
         ok("SHA256SUMS: the real hashes", text.splitlines()[0].split("  ")[0] == hashlib.sha256(
             b"asset " + names[0].encode()).hexdigest())
-        ok("check passes", check("0.1.0", a)[-1].startswith("SHA256SUMS: the 6 assets"))
+        ok("check passes", check("0.1.0", a)[-1].startswith("SHA256SUMS: the 7 assets"))
         ok("sums again over its own SHA256SUMS", sums("0.1.0", a) == text)
 
         b = fill(d / "b")
@@ -231,7 +252,7 @@ def self_test():
         ok("sums: exit 1 with the message", r.returncode == 1 and "missing" in r.stderr)
         try:
             r = subprocess.run(["sha256sum", "-c", SUMS], cwd=a, capture_output=True, text=True)
-            ok("sha256sum -c reads SHA256SUMS", r.returncode == 0 and r.stdout.count(": OK") == 6)
+            ok("sha256sum -c reads SHA256SUMS", r.returncode == 0 and r.stdout.count(": OK") == 7)
         except FileNotFoundError:
             print("skip sha256sum -c (no sha256sum on PATH)")
 

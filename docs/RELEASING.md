@@ -323,11 +323,25 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   `tauri.conf.json` and the overlay's `shell/<v>/` agree; it prints `releasable: no (unsigned; the updater key is a
   placeholder)`), then `e7-preflight.py workflow` on this workflow (SHA pins, permissions, no deployment target, no
   credential, no OIDC). Outputs the version and the commit time.
-- `tools` (windows-2025): `cargo install --locked --root` of tauri-cli and cargo-auditable at the versions in
-  `scripts/release-tools.env`, uploaded with `tools.sha256`; the list's own hash is the job's output.
-- `build-x64`, `build-arm64` (windows-2025): `scripts/e7-release-build.sh <arch> <out>` runs `repro-build.sh
+- `tools` (windows-2025): `cargo install --locked --root` of tauri-cli, cargo-auditable and cargo-cyclonedx at the
+  versions in `scripts/release-tools.env`, uploaded with `tools.sha256`; the list's own hash is the job's output.
+- `build-x64`, `build-arm64` (windows-2025): `scripts/e7-release-build.sh <arch> <out> <version>` runs `repro-build.sh
   --auditable --gui` for the target (x64 also runs `check-worker-symbols.sh`) and writes `unsigned.sha256` for the six
-  PEs. Each job checks the tools against their list and the list against `tools`' output first.
+  PEs. Each job checks the tools against their list and the list against `tools`' output first. Then (part 1d) it runs
+  `cargo cyclonedx --describe binaries --format json --spec-version 1.5 --target <triple>` three times, with
+  `SOURCE_DATE_EPOCH` the commit time (so no serial number and a fixed timestamp): in the root workspace with its
+  default features, for `lpk-gui` with the features tauri-cli builds it with (`--no-default-features --features
+  "updater tauri/custom-protocol"`; the script stops if the GUI's default features change), and in `workers/` with its
+  default features (never `faults`). cargo-cyclonedx has no `--locked`, so the script then requires `Cargo.lock` and
+  `workers/Cargo.lock` unchanged; an EXIT trap removes any SBOM its runs left in the source tree if it stops early.
+  `scripts/e7-sboms.py collect --version <v> --root <checkout>` keeps one SBOM per shipped binary as
+  `sboms/<binary>.cdx.json` (`lpk`, `lpk-check`, `lpk-worker`, `lpk-worker-libarchive`, `lpk_shell`, `lpk-gui`), the
+  checkout rewritten to `/lpk` (see "The SBOM asset"), leaves the unshipped binaries' out by name, and fails on a
+  missing SBOM, an extra one (of any other binary, or a shipped one twice), or one that is not valid: CycloneDX JSON
+  of spec 1.5 whose `metadata.component` names its binary at version `<v>`, with a dependencies entry for it, a
+  non-empty component list (`tauri-plugin-updater` among the GUI's), the job's target-triple property, and no
+  absolute path left. `sboms.sha256` lists the six; its hash is the job's second output (`unsigned.sha256` stays the
+  list of the six PEs that the later jobs read line by line).
 - `package` (windows-2025): checks every download against its list and every list against its job's output. For each
   architecture it copies the built GUI to `target\<triple>\release\`, writes the overlay with
   `scripts/e7-nsis-overlay.py`, and runs `cargo tauri bundle --ci -v --bundles nsis --target <triple>
@@ -342,12 +356,15 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
 - `install-arm64` (windows-11-arm): the ARM64 installer run with `/S` installs. Each installed PE is machine 0xAA64
   (the COFF Machine field read with `od`, as `arm64-smoke` does: the job has no Python) and byte-equal to the build's. `bin\lpk.exe --version` runs, and `bin\lpk.exe`
   round-trips a small folder. A silent uninstall (waited on with `e7-wait-uninstaller.sh`) leaves no install folder.
-- `assemble` (windows-2025, part 1c): checks `unsigned-x64`, `unsigned-arm64` and `installers` against their lists
-  and the lists against the build and `package` jobs' outputs. It runs the self-tests of `make-zips.py`,
-  `scripts/e7-assets.py` and `scripts/e7-artefacts.py`, then `make-zips.py` per architecture (`--bin` the build job's
-  artifact, the version and the commit time from `preflight`) and copies the two installers beside the zips.
-  `e7-assets.py sums` writes `SHA256SUMS` over exactly the six expected assets and `check` reads it back. Both
-  `e7-artefacts.py` commands take `--version` and refuse a folder holding anything but those six and `SHA256SUMS`.
+- `assemble` (windows-2025, part 1c): checks `unsigned-x64`, `unsigned-arm64` (their `unsigned.sha256` and
+  `sboms.sha256`) and `installers` against their lists and the lists against the build and `package` jobs' outputs.
+  It runs the self-tests of `make-zips.py`, `scripts/e7-sboms.py`, `scripts/e7-assets.py` and
+  `scripts/e7-artefacts.py`, then `make-zips.py` per architecture (`--bin` the build job's artifact, the version and
+  the commit time from `preflight`) and copies the two installers beside the zips. `e7-sboms.py pack` writes the SBOM
+  zip from both build jobs' `sboms/` (part 1d) and `e7-sboms.py check` reads it back. `e7-assets.py sums` writes
+  `SHA256SUMS` over exactly the seven expected assets and `check` reads it back. Both `e7-artefacts.py` commands take
+  `--version` and refuse a folder holding anything but those seven and `SHA256SUMS`, and then look inside the six
+  artefacts only (`e7-assets.py`'s `artefacts`): the SBOM zip holds no PE and no notices.
   `e7-artefacts.py notices` is E7-8 part 2's finder: every artefact holds `THIRD-PARTY-NOTICES`, `LICENSE-APACHE`
   and `LICENSE-MIT` exactly once each, at its top folder (`LitePack/` in a zip, the root in an installer), byte-equal
   to the repository's. Names are compared without regard to case or separator, so a second copy anywhere fails (the
@@ -361,9 +378,10 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   0x200, the stub an MZ PE). It must carry its own first header at the same S with NSIS's `FH_FLAGS_UNINSTALL` bit set
   (clear in the installer's), have the installer's section table, and equal the installer's `[0, S)` everywhere but
   inside `.rsrc` (the uninstaller's icon is patched in there; R391) and the PE `CheckSum` field. Anything else fails.
-  It prints each PE with its class, machine and SHA-256, both flags words and each differing byte range with its
-  section, a count per class, and 7-Zip's full listing of each installer. The job uploads
-  `release-assets` (the six assets and `SHA256SUMS`, kept 14 days) and outputs the SHA-256 of `SHA256SUMS`.
+  It prints each PE with its class, machine and SHA-256, both flags words, one line per part of the stub where the
+  uninstaller differs (its count of ranges and bytes, its first and last range) and every range outside `.rsrc` and
+  the `CheckSum` in full (R393), a count per class, and 7-Zip's full listing of each installer. The job uploads
+  `release-assets` (the seven assets and `SHA256SUMS`, kept 14 days) and outputs the SHA-256 of `SHA256SUMS`.
 - `smoke-x64` (windows-2025) and `smoke-arm64` (windows-11-arm): `SHA256SUMS` checked against `assemble`'s output,
   then `sha256sum -c`. The CLI and portable zips of the runner's architecture are unzipped with Windows' own
   `tar.exe`. From the CLI zip: each PE's machine is the runner's (`e7-pe-sections.py --machine` on x64, `od` on ARM64,
@@ -376,10 +394,30 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
 **The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
 names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,
 `litepack-<v>-windows-x64-cli.zip`, `litepack-<v>-windows-arm64-portable.zip` and
-`litepack-<v>-windows-arm64-cli.zip` (`make-zips.py`'s), and `SHA256SUMS` (`sha256sum`'s text format, `<hex>  <name>`,
-LF line ends, sorted by name). `python -I scripts/e7-assets.py expected --version <v>` prints the six names; its
-self-test checks them against `make-zips.py` and `productName`. A user checks a download with
-`sha256sum -c SHA256SUMS --ignore-missing`.
+`litepack-<v>-windows-arm64-cli.zip` (`make-zips.py`'s), `litepack-<v>-sbom.zip` (part 1d, `e7-sboms.py`'s), and
+`SHA256SUMS` (`sha256sum`'s text format, `<hex>  <name>`, LF line ends, sorted by name).
+`python -I scripts/e7-assets.py expected --version <v>` prints the seven names; its self-test checks them against
+`make-zips.py`, `e7-sboms.py` and `productName`. A user checks a download with `sha256sum -c SHA256SUMS
+--ignore-missing`.
+
+**The SBOM asset.** `litepack-<v>-sbom.zip` holds the folders `x64/` and `arm64/`, each with one CycloneDX 1.5 JSON
+SBOM per shipped binary of that architecture: `lpk.cdx.json`, `lpk-check.cdx.json`, `lpk-worker.cdx.json`,
+`lpk-worker-libarchive.cdx.json`, `lpk_shell.cdx.json` and `lpk-gui.cdx.json`, twelve in all. Each is cargo-cyclonedx's
+output (`--describe binaries`, the architecture's `--target`, the build's features and lockfiles) with one change:
+the checkout's path is rewritten to `/lpk`, the prefix `repro-build.sh` remaps the binaries' paths to (R394). The
+rewrite covers every string, in every spelling cargo-cyclonedx writes it: the `path+file:///<checkout>/...`
+`bom-ref`s and every `ref` and `dependsOn` naming them (so references stay consistent), and the percent-encoded,
+backslashed `download_url` inside the package URL of `lpk-proto` and `lpk-sandbox-sys`, which the `workers/` run
+reaches outside its own workspace (`file:///lpk\crates\lpk-proto`). The JSON is re-serialised with an indent of two.
+`collect` then fails if any string still holds the checkout, the cargo home, the user profile or any other Windows
+absolute path, plain or percent-encoded. Each SBOM holds the binary as `metadata.component` (its version the
+release's), every crate it depends on for that target as a component with its version, licence and package URL, and
+the dependency graph (an entry for the binary's own `bom-ref` required, and a non-empty component list; the GUI's must
+list `tauri-plugin-updater`, the marker of its updater feature). cargo-cyclonedx reads the workspace's metadata, where
+cargo merges the features of every member, so an SBOM may list a crate that only another member's features turn on:
+it lists at least what ships, never less. The zip is deterministic as the other zips are (sorted entries, the commit
+time, fixed attributes). Until part 2, the SBOMs describe the unsigned build: part 2 attests them with the signed
+artefacts (`docs/notes/e7-design.md` section 1).
 
 **The ARM64 installer.** The hooks cannot see the template's `${ARCH}`, so the ARM64 overlay names
 `crates/lpk-gui/installer-arm64.nsh` as its hooks file. That file defines `LPK_INSTALLER_ARCH` as `arm64` and includes
@@ -389,8 +427,7 @@ any PC that is not ARM64. The x64 installer refuses on ARM64, as before, and on 
 **Unsigned, and deferred to part 2.** Every PE and both installers are unsigned. Part 2 adds signing (with
 `signtool verify`), its deployment target, attestation, the draft release and the tag trigger, the updater's
 `latest.json` signature, and the proof that the bundler downloads nothing (here it may fetch NSIS itself). The later
-steps of part 1 add the rest: part 1d the SBOMs (E8-6's half: one CycloneDX SBOM per binary, planned as one more
-asset, `litepack-<v>-sbom.zip`), and part 1e the install checks on both architectures (a silent install of each
+steps of part 1 add the rest: part 1d the SBOMs (E8-6's half; done, above), and part 1e the install checks on both architectures (a silent install of each
 architecture's installer, its layout and notices, the GUI and `bin\lpk.exe` on a `.lpk` and a `.zip`, a silent
 uninstall and the residue diff). Part 2 then signs the PEs and both installers, and `assemble` checks the
 artefacts against the signed files instead (`docs/notes/e7-design.md` section 1). Signing also changes the bytes of
