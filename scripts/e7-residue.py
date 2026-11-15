@@ -2,8 +2,13 @@
 
     python -I scripts/e7-residue.py snapshot <out.json> [--on-ci]
     python -I scripts/e7-residue.py diff <before.json> <after.json>
-        [--allow-worker-profile | --require-worker-profile] [--allow-settings]
+        [--allow-worker-profile | --require-worker-profile] [--allow-settings] [--verdict all|litepack]
     python -I scripts/e7-residue.py --self-test
+
+--verdict litepack (R408; release.yml's verify-arm64 alone): an entry not allowed is a verdict only when it is
+LitePack's own (`litepack_own`: `litepack`, `lpk`, LitePack's CLSID or its jump list's a233dcd0c3d36a7d in its path,
+value name or data; in or naming the run folder; under Run, RunOnce, HKCU\\Environment, RegisteredApplications,
+Classes\\.lpk or Uninstall; the worker profile's SID). Any other is printed as `OTHER:` and counted, not a verdict.
 
 `snapshot` refuses unless GITHUB_ACTIONS=true or --on-ci is given: use it only on a disposable
 machine. Every path it cannot read is printed and recorded; `diff` reports such a path as
@@ -63,6 +68,7 @@ that belong to it, nothing else:
 
 import argparse
 import codecs
+import io
 import json
 import os
 import re
@@ -974,10 +980,58 @@ def settings_only(after):
     return all(norm(p) == norm(SETTINGS_FILE) for p in inside)
 
 
-def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uninstaller=False):
+# R408: `diff --verdict litepack` (verify-arm64 alone): a residue line is a verdict only when it is LitePack's own.
+# The names that make it so (case-blind, in its path, value name or data): LitePack itself (org.litepack.gui and
+# LitePack.Worker too), `lpk` (lpk.exe, .lpk, lpk_shell.dll), its shell CLSID, and the jump list's file name for its
+# AppUserModelID (installer.nsh).
+LITEPACK_MARKS = ("litepack", "lpk", norm(LITEPACK_CLSID), "a233dcd0c3d36a7d")
+VERDICT_REASON = "no verdict with --verdict litepack"
+
+
+def verdict_keys():
+    """The keys LitePack must never leave anything under, whatever its name (R408): R380's rule 5 list
+    (R380_NEVER_KEYS: Run, RunOnce, HKCU\\Environment), RegisteredApplications, Classes\\.lpk and Uninstall."""
+    return R380_NEVER_KEYS + [REGISTERED_APPS, CLASSES + r"\.lpk", CURRENT_VERSION + r"\Uninstall"]
+
+
+def expand_root(path):
+    """A snapshot path with its %ROOT% token replaced by the folder it names (None if unknown)."""
+    m = re.match(r"%([A-Z]+)%(.*)", path)
+    if not m:
+        return path
+    folder = root_dir(m.group(1))
+    return folder.rstrip("\\") + m.group(2) if folder else None
+
+
+def litepack_own(kind, path, name, rec, run, worker_sids=()):
+    """R408: whether a residue line is LitePack's own: a LitePack mark in its path, value name or data; or it lies
+    in (a file) or names (any text) the run folder; or it lies under a key of `verdict_keys()`; or it is the worker
+    profile's (its SID)."""
+    texts = [path, name or ""] + ([rec] if kind == "value" and isinstance(rec, str) else [])
+    for t in texts:
+        t = norm(t)
+        if any(m in t for m in LITEPACK_MARKS):
+            return True
+    if run:
+        r = norm(str(run).replace("/", "\\").rstrip("\\"))
+        # A .reg export doubles the backslashes inside string data.
+        if any(r in norm(t) or r.replace("\\", "\\\\") in norm(t) for t in texts):
+            return True
+        if kind == "file":
+            real = expand_root(path)
+            if real is not None and under(real, r):
+                return True
+    if kind != "file" and any(under(path, k) for k in verdict_keys()):
+        return True
+    parts = [norm(p) for p in path.split("\\")]
+    return any(p in worker_sids for p in parts)
+
+
+def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uninstaller=False, verdict="all"):
     """The diff's lines and the number of entries not allowed. A path unreadable in either
     snapshot is listed (and counted unless allowed) even when both record it alike: what lies
-    inside it was not seen."""
+    inside it was not seen. With verdict="litepack" (R408), a line not allowed that is not LitePack's own
+    (`litepack_own`) is printed as OTHER and not counted."""
     b, a = entries(before), entries(after)
     sids = profile_sids(before, after)
     changes = []
@@ -1023,6 +1077,8 @@ def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uni
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
                 not unread:
             lines.append(f"profile: {text}")
+        elif verdict == "litepack" and not litepack_own(kind, path, name, rec, run, sids):
+            lines.append(f"OTHER: {text}")
         else:
             lines.append(f"RESIDUE: {text}")
             bad += 1
@@ -1066,6 +1122,9 @@ def main(argv):
                    help=r"allow %%APPDATA%%\LitePack\settings.json alone (an uninstall without the box)")
     d.add_argument("--allow-uninstaller-copy", action="store_true",
                    help=r"R312: allow %%LOCALAPPDATA%%\Temp\~nsu*.tmp holding one Un.exe alone")
+    d.add_argument("--verdict", choices=("all", "litepack"), default="all",
+                   help="R408: `litepack` makes only LitePack's own residue a verdict (release.yml's verify-arm64); "
+                        "the rest is printed as OTHER")
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
         snapshot(a.out, a.on_ci)
@@ -1076,11 +1135,16 @@ def main(argv):
     if run is None and os.environ.get("RUNNER_TEMP"):
         run = os.path.join(os.environ["RUNNER_TEMP"], "portable-run", "LitePack")
     lines, bad = diff(load(a.before), load(a.after), allow, run, a.allow_settings,
-                      a.allow_uninstaller_copy)
+                      a.allow_uninstaller_copy, a.verdict)
     for line in lines:
         print(line)
     flag = " (worker profile allowed)" if allow else ""
-    print(f"{len(lines)} differences{flag}, {bad} not allowed")
+    if a.verdict == "litepack":
+        other = sum(1 for line in lines if line.startswith("OTHER: "))
+        print(f"{len(lines)} differences{flag}, {bad + other} not allowed: {bad} LitePack's, {other} other "
+              f"({VERDICT_REASON})")
+    else:
+        print(f"{len(lines)} differences{flag}, {bad} not allowed")
     missing = profile_present(lines) if a.require_worker_profile else []
     for m in missing:
         print(f"PROFILE MISSING: {m}")
@@ -2038,6 +2102,78 @@ class Tests(unittest.TestCase):
         key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Start\TileProperties\W~org.litepack.gui"
         self.assertIsNone(allowed("key", key, None, "+", snap()))
         self.assertIsNone(allowed("value", key, "Category", "+", snap()))
+
+    # R408 (CI run 43753831748's verify-arm64): with --verdict litepack, only LitePack's own residue is a verdict.
+    R408_CLOUD = (r"HKCU\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+                  r"\$$windows.data.placeholdertilecollection\Current")
+    R408_CDM = (r"%LOCALAPPDATA%\Packages\Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy\Settings"
+                r"\settings.dat")
+
+    def r408(self, files=None, registry=None, before_files=None, before_registry=None, run=None, verdict="litepack"):
+        before = snap(dict(self.base["files"], **(before_files or {})),
+                      dict(self.base["registry"], **(before_registry or {})))
+        after = snap(dict(before["files"], **(files or {})), dict(before["registry"], **(registry or {})))
+        return diff(before, after, False, run, verdict=verdict)
+
+    def test_r408_litepacks_own_residue_stays_a_verdict(self):
+        run_key = CURRENT_VERSION + r"\Run"
+        cases = [
+            {"registry": {r"HKCU\Software\Vendor\Thing": {"Target": r'"C:\\Apps\\LitePack\\lpk-gui.exe"'}}},
+            {"registry": {r"HKCU\Software\Org.LitePack.Gui": {}}},
+            {"registry": {CLASSES + r"\CLSID\\" + LITEPACK_CLSID: {}}},
+            {"registry": {run_key: {"SomeUpdater": '"C:\\\\x\\\\u.exe"'}}},
+            {"before_registry": {r"HKCU\Environment": {"Path": '"C:\\\\a"'}},
+             "registry": {r"HKCU\Environment": {"Path": '"C:\\\\a;C:\\\\b"'}}},
+            {"registry": {REGISTERED_APPS: {"Other": '"x"'}}},
+            {"registry": {CURRENT_VERSION + r"\Uninstall\Other": {}}},
+            {"registry": {CLASSES + r"\.lpk\OpenWithProgids": {}}},
+            {"files": {r"%APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations"
+                       r"\a233dcd0c3d36a7d.automaticDestinations-ms": f()}},
+        ]
+        for c in cases:
+            lines, bad = self.r408(**c)
+            # (An added key of another name that holds LitePack's value is OTHER itself; its value is the verdict.)
+            self.assertGreaterEqual(bad, 1, (c, lines))
+            self.assertEqual(bad, sum(1 for line in lines if line.startswith("RESIDUE: ")), (c, lines))
+        with unittest.mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\U\AppData\Local"}):
+            run = "C:/U/AppData/Local/Apps/Run"
+            lines, bad = self.r408(files={r"%LOCALAPPDATA%\Apps\Run\x.txt": f()}, run=run)
+            self.assertEqual(bad, 1, lines)
+            # A value whose data names the run folder (doubled backslashes, as reg export writes it).
+            lines, bad = self.r408(registry={r"HKCU\Software\Vendor": {"p": r'"C:\\U\\AppData\\Local\\Apps\\Run\\a"'}},
+                                   run=run)
+            self.assertEqual(bad, 1, lines)
+            lines, bad = self.r408(files={r"%LOCALAPPDATA%\Apps\Runner\x.txt": f()}, run=run)
+            self.assertEqual(bad, 0, lines)
+
+    def test_r408_other_residue_is_printed_and_no_verdict_but_the_default_still_fails(self):
+        for c in ({"registry": {self.R408_CLOUD: {"Data": "hex:01,02"}}}, {"files": {self.R408_CDM: f()}},
+                  {"before_files": {self.R408_CDM: f()}, "files": {self.R408_CDM: f(size=2)}}):
+            lines, bad = self.r408(**c)
+            self.assertEqual(bad, 0, (c, lines))
+            self.assertTrue(lines and all(line.startswith("OTHER: ") for line in lines), (c, lines))
+        lines, bad = self.r408(registry={self.R408_CLOUD: {"Data": "hex:01,02"}}, verdict="all")
+        self.assertEqual(bad, 2, lines)
+        self.assertTrue(all(line.startswith("RESIDUE: ") for line in lines), lines)
+
+    def test_r408_the_cli_counts_both_and_fails_only_on_litepacks(self):
+        with tempfile.TemporaryDirectory() as d:
+            b, a = Path(d) / "b.json", Path(d) / "a.json"
+            b.write_text(json.dumps(self.base), encoding="utf-8")
+            reg = dict(self.base["registry"], **{self.R408_CLOUD: {}})
+            a.write_text(json.dumps(snap(self.base["files"], reg)), encoding="utf-8")
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out):
+                rc = main(["diff", str(b), str(a), "--verdict", "litepack"])
+                rc_all = main(["diff", str(b), str(a)])
+            self.assertEqual((rc, rc_all), (0, 1), out.getvalue())
+            self.assertIn("1 differences, 1 not allowed: 0 LitePack's, 1 other (no verdict with --verdict "
+                          "litepack)", out.getvalue())
+            reg[r"HKCU\Software\LitePack"] = {}
+            a.write_text(json.dumps(snap(self.base["files"], reg)), encoding="utf-8")
+            with unittest.mock.patch("sys.stdout", io.StringIO()) as out2:
+                self.assertEqual(main(["diff", str(b), str(a), "--verdict", "litepack"]), 1)
+            self.assertIn("2 not allowed: 1 LitePack's, 1 other", out2.getvalue())
 
     def test_r380_the_parser_reads_shows_format(self):
         self.assertEqual(parse_shown(r'+ value HKCU\A [@] = "x"'), ("+", "value", r"HKCU\A", "", '"x"'))

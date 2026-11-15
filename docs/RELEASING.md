@@ -434,6 +434,21 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   - Every diff and wait records a verdict line and the job goes on, so one run prints all of them; the last step
     fails on any. A WebView2 query that fails (`pwsh` with `$ErrorActionPreference = "Stop"`, or `tasklist` itself)
     is a verdict too (R403).
+  - **verify-arm64's residue verdicts are scoped to LitePack's own records (R408).** Four runs of `verify-arm64`
+    showed four different sets of records the windows-11-arm image wrote on its own: a client Windows still running
+    its first-logon tasks while the job runs (Store and Widgets packages, CloudStore, notifications, start-up
+    notifications), so a per-record allow-list does not converge there. Its two portable diffs (after the GUI and
+    after `--remove-profile`) and its uninstall diff run `e7-residue.py diff --verdict litepack`. There a line not
+    allowed is still a verdict when it is LitePack's: `litepack`, `lpk`, LitePack's shell CLSID or its jump list's
+    `a233dcd0c3d36a7d` in its path, value name or data; a file in, or any text naming, the run folder; anything under
+    `Run`, `RunOnce`, `HKCU\Environment`, `RegisteredApplications`, `Classes\.lpk` or `Uninstall`, whatever its name;
+    and the worker profile's SID. Every other line is printed as `OTHER:` for reading and counted in the summary
+    (`N not allowed: M LitePack's, K other`), but fails nothing. The mid-test diff after the installed GUI keeps its
+    one verdict, a missing worker profile. `verify-x64`, both its diffs, and every `ci.yml` job stay strict (every
+    line not allowed is a verdict); LitePack runs the same code on both architectures, and `verify-x64` passed strict
+    on three runs running. The cost if this is wrong: a write LitePack made on ARM64 alone, into a Windows area under
+    a name not its own, would be printed but would not fail the job. R401 to R407's entries stay, so the `OTHER`
+    lines stay few.
   Their results gate nothing yet: no tag and no release exist. The allowances `e7-residue.py` makes were ruled on
   from each runner's own records (R365, R372, R380, R388; R401, R404 and R406 for the verify jobs' first runs),
   never guessed. The windows-11-arm image, a client Windows with Store apps and Firefox, writes more on its own than

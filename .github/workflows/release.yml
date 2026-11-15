@@ -1241,8 +1241,10 @@ jobs:
           if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p2-after-gui.txt"; then
             echo "p2-after-gui: a stored credential names LitePack" >> "$SNAP/verdicts"
           fi
+          # R408: on windows-11-arm only LitePack's own residue is a verdict (e7-residue.py --verdict litepack); the
+          # client image's first-logon writes are printed as OTHER. verify-x64 and ci.yml stay strict.
           python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/p1-before.json" "$SNAP/p2-after-gui.json" \
-            --require-worker-profile || echo "portable, after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
+            --require-worker-profile --verdict litepack || echo "portable, after the GUI: residue, or no worker profile" >> "$SNAP/verdicts"
       - name: The portable residue after --remove-profile (nothing allowed)
         run: |
           "$RUNF/lpk-worker.exe" --remove-profile
@@ -1251,8 +1253,10 @@ jobs:
           if grep -iE 'litepack|lpk' "$SNAP/cmdkey-p3-after-remove.txt"; then
             echo "p3-after-remove: a stored credential names LitePack" >> "$SNAP/verdicts"
           fi
+          # R408: on windows-11-arm only LitePack's own residue is a verdict (e7-residue.py --verdict litepack); the
+          # client image's first-logon writes are printed as OTHER. verify-x64 and ci.yml stay strict.
           python -I scripts/e7-residue.py diff --run-folder "$RUNF" "$SNAP/p1-before.json" "$SNAP/p3-after-remove.json" \
-            || echo "portable, after --remove-profile: residue" >> "$SNAP/verdicts"
+            --verdict litepack || echo "portable, after --remove-profile: residue" >> "$SNAP/verdicts"
       # ci.yml's installer job: "Snapshot before".
       - name: Snapshot before the install
         run: |
@@ -1392,8 +1396,10 @@ jobs:
           for x in "$d"/ns*.tmp; do [ -d "$x" ] || continue; n=$((n + 1)); echo "NSIS folder $x:"; ls -la "$x"; done
           echo "after the uninstall: $n ns*.tmp folders in $d"
           python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
+          # R408: on windows-11-arm only LitePack's own residue is a verdict (e7-residue.py --verdict litepack); the
+          # client image's first-logon writes are printed as OTHER. verify-x64 and ci.yml stay strict.
           python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
-            --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST" --verdict litepack || echo "after the uninstall: residue" >> "$SNAP/verdicts"
       - name: Residue verdict
         run: |
           if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
