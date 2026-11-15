@@ -1,0 +1,466 @@
+name: Release
+
+# E7-2 part 1 (docs/notes/e7-design.md section 1; docs/RELEASING.md "The release workflow"): the release workflow
+# without the signing identity. Part 1b builds the six shipped PEs for x64 and ARM64 the way release-checks.yml's
+# reproducible job compares them (scripts/e7-release-build.sh, through scripts/repro-build.sh), bundles both
+# per-user NSIS installers from those very binaries, and runs the ARM64 installer on both architectures: refused on
+# x64, installed and uninstalled on ARM64. Nothing is signed, nothing is published: no release, no tag, no GitHub
+# deployment target, no stored credential, no OIDC token, no cache (part 2 adds signing and publishing; later parts of
+# part 1 add the zips, SHA256SUMS, the SBOMs and the residue checks). Every action is pinned by its commit SHA, the
+# tag in a comment; the preflight job checks this file for that (scripts/e7-preflight.py workflow).
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/repro-build.sh
+      - scripts/release-tools.env
+      - scripts/cargo-auditable.cmd
+      - scripts/e7-*
+      - crates/lpk-gui/installer*.nsh
+      - crates/lpk-gui/tauri*.conf.json
+      - rust-toolchain.toml
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - scripts/repro-build.sh
+      - scripts/release-tools.env
+      - scripts/cargo-auditable.cmd
+      - scripts/e7-*
+      - crates/lpk-gui/installer*.nsh
+      - crates/lpk-gui/tauri*.conf.json
+      - rust-toolchain.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# As release-checks.yml: a newer push to a pull request cancels its older runs; runs on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The versions agree, the release is not releasable yet (unsigned, the updater key a placeholder), and this file
+  # pins every action by SHA with read-only permissions.
+  preflight:
+    name: preflight (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      timestamp: ${{ steps.version.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: The preflight and overlay scripts' own tests
+        run: |
+          python -I scripts/e7-preflight.py --self-test
+          python -I scripts/e7-nsis-overlay.py --self-test
+      - name: Versions and releasability
+        id: version
+        run: |
+          python -I scripts/e7-preflight.py version | tee "$RUNNER_TEMP/version.txt"
+          v="$(sed -n 's/^version: //p' "$RUNNER_TEMP/version.txt")"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+      - name: This workflow's pins and permissions
+        run: python -I scripts/e7-preflight.py workflow .github/workflows/release.yml
+
+  # tauri-cli and cargo-auditable at the versions of scripts/release-tools.env, built once and handed to every later
+  # job with their SHA-256 list; the list's own hash is this job's output, so a later job checks both.
+  tools:
+    name: build tools (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    outputs:
+      list: ${{ steps.list.outputs.sha256 }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - name: cargo install tauri-cli and cargo-auditable (scripts/release-tools.env)
+        run: |
+          set -euo pipefail
+          source scripts/release-tools.env
+          root="$(cygpath -u "$RUNNER_TEMP")/tools"
+          cargo install --locked --root "$root" --version "=$TAURI_CLI_VERSION" tauri-cli
+          cargo install --locked --root "$root" --version "=$CARGO_AUDITABLE_VERSION" cargo-auditable
+          PATH="$root/bin:$PATH" cargo tauri --version
+          PATH="$root/bin:$PATH" cargo auditable --version
+      - name: tools.sha256
+        id: list
+        run: |
+          cd "$(cygpath -u "$RUNNER_TEMP")/tools/bin"
+          ls -la
+          sha256sum cargo-tauri.exe cargo-auditable.exe > tools.sha256
+          cat tools.sha256
+          echo "sha256=$(sha256sum tools.sha256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tools
+          path: ${{ runner.temp }}/tools/bin
+          retention-days: 3
+          if-no-files-found: error
+
+  # The two build jobs: one script (scripts/e7-release-build.sh), two named jobs so that each can output the hash of
+  # its own unsigned.sha256 (a matrix's legs cannot have separate outputs).
+  build-x64:
+    name: build x64 (windows-2025)
+    needs: [preflight, tools]
+    runs-on: windows-2025
+    timeout-minutes: 120
+    outputs:
+      list: ${{ steps.list.outputs.sha256 }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tools
+          path: ${{ runner.temp }}/tools
+      - name: Check the tools against tools.sha256 and its hash, then put them on PATH
+        env:
+          TOOLS_LIST: ${{ needs.tools.outputs.list }}
+        run: |
+          cd "$(cygpath -u "$RUNNER_TEMP")/tools"
+          test "$(sha256sum tools.sha256 | cut -d ' ' -f 1)" = "$TOOLS_LIST" || { echo "tools.sha256 is not the tools job's"; exit 1; }
+          sha256sum -c tools.sha256
+          cygpath -w "$PWD" >> "$GITHUB_PATH"
+      - name: Build the six shipped PEs (scripts/e7-release-build.sh x64)
+        run: |
+          cargo tauri --version
+          cargo auditable --version
+          bash scripts/e7-release-build.sh x64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64"
+      - name: The hash of unsigned.sha256
+        id: list
+        run: echo "sha256=$(sha256sum "$(cygpath -u "$RUNNER_TEMP")/unsigned-x64/unsigned.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-x64
+          path: ${{ runner.temp }}/unsigned-x64
+          retention-days: 7
+          if-no-files-found: error
+
+  build-arm64:
+    name: build arm64 (windows-2025)
+    needs: [preflight, tools]
+    runs-on: windows-2025
+    timeout-minutes: 120
+    outputs:
+      list: ${{ steps.list.outputs.sha256 }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+          rustup target list --installed
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tools
+          path: ${{ runner.temp }}/tools
+      - name: Check the tools against tools.sha256 and its hash, then put them on PATH
+        env:
+          TOOLS_LIST: ${{ needs.tools.outputs.list }}
+        run: |
+          cd "$(cygpath -u "$RUNNER_TEMP")/tools"
+          test "$(sha256sum tools.sha256 | cut -d ' ' -f 1)" = "$TOOLS_LIST" || { echo "tools.sha256 is not the tools job's"; exit 1; }
+          sha256sum -c tools.sha256
+          cygpath -w "$PWD" >> "$GITHUB_PATH"
+      - name: Build the six shipped PEs (scripts/e7-release-build.sh arm64)
+        run: |
+          cargo tauri --version
+          cargo auditable --version
+          bash scripts/e7-release-build.sh arm64 "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64"
+      - name: The hash of unsigned.sha256
+        id: list
+        run: echo "sha256=$(sha256sum "$(cygpath -u "$RUNNER_TEMP")/unsigned-arm64/unsigned.sha256" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-arm64
+          path: ${{ runner.temp }}/unsigned-arm64
+          retention-days: 7
+          if-no-files-found: error
+
+  # Both installers from the build jobs' binaries: `cargo tauri bundle` compiles nothing; the GUI goes where the
+  # bundler looks for it, the overlay (scripts/e7-nsis-overlay.py) names the other PEs in the downloaded artifact and
+  # the architecture's hooks file. --no-binary-patching: the installed lpk-gui.exe is the built one (checked below
+  # through 7-Zip, and after the ARM64 install). The bundler may download NSIS here (part 2 proves it does not).
+  package:
+    name: NSIS installers (windows-2025)
+    needs: [preflight, tools, build-x64, build-arm64]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    outputs:
+      list: ${{ steps.list.outputs.sha256 }}
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      # tauri-cli reads the workspace's cargo metadata, so the pinned toolchain is installed (nothing is compiled).
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - name: Work folders
+        run: |
+          echo "T=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+          echo "source commit time: ${{ needs.preflight.outputs.timestamp }}, version $VERSION"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tools
+          path: ${{ runner.temp }}/tools
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: unsigned-x64
+          path: ${{ runner.temp }}/unsigned-x64
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: unsigned-arm64
+          path: ${{ runner.temp }}/unsigned-arm64
+      - name: Check every download against its list and every list against its job's output
+        env:
+          TOOLS_LIST: ${{ needs.tools.outputs.list }}
+          X64_LIST: ${{ needs.build-x64.outputs.list }}
+          ARM64_LIST: ${{ needs.build-arm64.outputs.list }}
+        run: |
+          set -euo pipefail
+          check() {
+            local dir="$1" list="$2" want="$3"
+            test -n "$want" || { echo "no expected hash for $dir/$list"; exit 1; }
+            got="$(sha256sum "$dir/$list" | cut -d ' ' -f 1)"
+            test "$got" = "$want" || { echo "$dir/$list: $got, the job's output is $want"; exit 1; }
+            (cd "$dir" && sha256sum -c "$list")
+          }
+          check "$T/tools" tools.sha256 "$TOOLS_LIST"
+          check "$T/unsigned-x64" unsigned.sha256 "$X64_LIST"
+          check "$T/unsigned-arm64" unsigned.sha256 "$ARM64_LIST"
+          test "$(wc -l < "$T/unsigned-x64/unsigned.sha256")" = 6
+          test "$(wc -l < "$T/unsigned-arm64/unsigned.sha256")" = 6
+          cygpath -w "$T/tools" >> "$GITHUB_PATH"
+      - name: Bundle the x64 and ARM64 installers
+        run: |
+          set -euo pipefail
+          cargo tauri --version
+          mkdir -p "$T/installers"
+          for arch in x64 arm64; do
+            case "$arch" in
+              x64) triple=x86_64-pc-windows-msvc ;;
+              arm64) triple=aarch64-pc-windows-msvc ;;
+            esac
+            bin="$T/unsigned-$arch"
+            rel="target/$triple/release"
+            mkdir -p "$rel"
+            cp "$bin/lpk-gui.exe" "$rel/lpk-gui.exe"
+            rm -rf "$rel/bundle/nsis"
+            python -I scripts/e7-nsis-overlay.py --arch "$arch" --bin "$bin" --repo "$(cygpath -m "$PWD")" \
+              --out "$T/installers/overlay-$arch.json"
+            log="$T/installers/bundle-$arch.log"
+            # -v: tauri-bundler runs makensis with -V4 and shows its output, so its warnings can be checked (R330).
+            (cd crates/lpk-gui && cargo tauri bundle --ci -v --bundles nsis --target "$triple" --no-binary-patching \
+              --no-sign --config "$T/installers/overlay-$arch.json") 2>&1 | tee "$log"
+            grep -q "Processing script file" "$log" || { echo "$log holds no makensis output"; exit 1; }
+            if grep -nE "warning 6000" "$log"; then echo "makensis warning 6000 in $log"; exit 1; fi
+            # The installer's name is the bundler's; exactly one, of this version and architecture.
+            mapfile -t found < <(find "$rel/bundle/nsis" -maxdepth 1 -name '*-setup.exe')
+            test "${#found[@]}" = 1 || { echo "expected one installer in $rel/bundle/nsis: ${found[*]}"; exit 1; }
+            name="$(basename "${found[0]}")"
+            case "$name" in
+              *"_${VERSION}_${arch}-setup.exe") echo "$arch installer: $name" ;;
+              *) echo "$name does not name version $VERSION and $arch"; exit 1 ;;
+            esac
+            cp "${found[0]}" "$T/installers/$name"
+            # The bundler patched nothing in place either.
+            (cd "$rel" && grep ' \*\?lpk-gui.exe$' "$bin/unsigned.sha256" | sha256sum -c -)
+          done
+          ls -la "$T/installers"
+      # --no-binary-patching, checked from outside: 7-Zip (on the windows-2025 image) reads the NSIS installer's
+      # files, and every PE it holds under a shipped name is byte-equal to the build job's (lpk-gui.exe required).
+      - name: The installers hold the built PEs unchanged (7-Zip)
+        run: |
+          set -euo pipefail
+          sz="$(cygpath -u "$PROGRAMFILES")/7-Zip/7z.exe"
+          test -x "$sz" || { echo "no 7-Zip at $sz"; exit 1; }
+          for arch in x64 arm64; do
+            setup="$(ls "$T/installers/"*"_${arch}-setup.exe")"
+            out="$T/unpacked-$arch"
+            "$sz" l "$setup"
+            "$sz" x -y -o"$out" "$setup" > /dev/null
+            gui="$(find "$out" -iname lpk-gui.exe)"
+            test "$(echo "$gui" | grep -c .)" = 1 || { echo "$arch: lpk-gui.exe not found once in the installer: $gui"; exit 1; }
+            checked=0
+            while read -r hash file; do
+              file="${file#\*}"
+              mapfile -t members < <(find "$out" -iname "$file")
+              test "$file" != lpk-gui.exe || test "${#members[@]}" = 1
+              for m in "${members[@]}"; do
+                got="$(sha256sum "$m" | cut -d ' ' -f 1)"
+                test "$got" = "$hash" || { echo "$arch: ${m#$out/} differs from the built $file"; exit 1; }
+                echo "$arch: ${m#$out/} equals the built $file"
+                checked=$((checked + 1))
+              done
+            done < "$T/unsigned-$arch/unsigned.sha256"
+            echo "$arch: $checked PEs in the installer equal the build's"
+          done
+      - name: installers.sha256
+        id: list
+        run: |
+          cd "$T/installers"
+          sha256sum *-setup.exe > installers.sha256
+          cat installers.sha256
+          test "$(wc -l < installers.sha256)" = 2
+          echo "sha256=$(sha256sum installers.sha256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers
+          path: ${{ runner.temp }}/installers
+          retention-days: 7
+          if-no-files-found: error
+
+  # The ARM64 installer on an x64 PC (as ci.yml's installer-arm64-refusal job runs the x64 one on ARM64): it exits
+  # non-zero within five minutes and writes nothing.
+  refuse-arm64-on-x64:
+    name: ARM64 installer refuses on x64 (windows-2025)
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 15
+    # Without these, Git's bash turns `/S` into a path (S:/), and the installer runs with its UI and waits.
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: installers
+          path: setup
+      - name: Check the installers against installers.sha256 and its hash
+        env:
+          LIST: ${{ needs.package.outputs.list }}
+        run: |
+          test "$(sha256sum setup/installers.sha256 | cut -d ' ' -f 1)" = "$LIST" || { echo "installers.sha256 is not the package job's"; exit 1; }
+          (cd setup && sha256sum -c installers.sha256)
+      - name: The ARM64 installer exits with an error and installs nothing
+        run: |
+          inst="$(cygpath -m "$LOCALAPPDATA")/LitePack"
+          test ! -e "$inst" || { echo "already present: $inst"; exit 1; }
+          setup="$(ls setup/*_arm64-setup.exe)"
+          rc=0; timeout 300 "$setup" /S || rc=$?
+          test "$rc" -ne 124 || { echo "the installer did not exit in five minutes"; tasklist; exit 1; }
+          echo "ARM64 installer on x64: exit code $rc"
+          ls -la "$inst" 2>/dev/null && { echo "files were written to $inst"; exit 1; }
+          test "$rc" -ne 0
+          echo "refused on x64 with nothing installed"
+
+  # The ARM64 installer on ARM64: a silent install, every installed PE ARM64 and byte-equal to the build's, bin\lpk.exe
+  # runs and round-trips a folder, then a silent uninstall leaves no install folder. (The residue diff: part 1d.)
+  install-arm64:
+    name: ARM64 install and uninstall (windows-11-arm)
+    needs: [preflight, build-arm64, package]
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: Work folders
+        run: |
+          echo "T=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+          echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: installers
+          path: ${{ runner.temp }}/setup
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: unsigned-arm64
+          path: ${{ runner.temp }}/unsigned-arm64
+      - name: Check the downloads against their lists and the lists against the jobs' outputs
+        env:
+          LIST: ${{ needs.package.outputs.list }}
+          ARM64_LIST: ${{ needs.build-arm64.outputs.list }}
+        run: |
+          test "$(sha256sum "$T/setup/installers.sha256" | cut -d ' ' -f 1)" = "$LIST" || { echo "installers.sha256 is not the package job's"; exit 1; }
+          test "$(sha256sum "$T/unsigned-arm64/unsigned.sha256" | cut -d ' ' -f 1)" = "$ARM64_LIST" || { echo "unsigned.sha256 is not build-arm64's"; exit 1; }
+          (cd "$T/setup" && sha256sum -c installers.sha256)
+          (cd "$T/unsigned-arm64" && sha256sum -c unsigned.sha256)
+      - name: Install silently; every installed PE is ARM64 and the built one
+        run: |
+          set -euo pipefail
+          test ! -e "$INST" || { echo "already present: $INST"; exit 1; }
+          setup="$(ls "$T/setup/"*_arm64-setup.exe)"
+          rc=0; timeout 300 "$setup" /S || rc=$?
+          echo "ARM64 installer on ARM64: exit code $rc"
+          test "$rc" -eq 0
+          ls -laR "$INST"
+          pes=(lpk-gui.exe bin/lpk.exe bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe "shell/$VERSION/lpk_shell.dll")
+          (cd "$INST" && python -I "$GITHUB_WORKSPACE/scripts/e7-pe-sections.py" --machine 0xAA64 "${pes[@]}")
+          for p in "${pes[@]}"; do
+            want="$(grep -E " \*?$(basename "$p")\$" "$T/unsigned-arm64/unsigned.sha256" | cut -d ' ' -f 1)"
+            got="$(sha256sum "$INST/$p" | cut -d ' ' -f 1)"
+            test -n "$want" && test "$got" = "$want" || { echo "$p: installed $got, built $want"; exit 1; }
+            echo "$p: the built one"
+          done
+          "$INST/bin/lpk.exe" --version
+      - name: bin\lpk.exe round-trips a small folder
+        run: |
+          set -euo pipefail
+          w="$T/work"
+          mkdir -p "$w/in/sub"
+          for i in 1 2 3; do echo "file $i" > "$w/in/sub/f$i.txt"; done
+          printf 'top\n' > "$w/in/top.txt"
+          "$INST/bin/lpk.exe" a "$w/small.lpk" "$w/in"
+          "$INST/bin/lpk.exe" x "$w/small.lpk" "$w/out"
+          diff -r "$w/in" "$w/out"
+          echo "round trip: the extracted files equal the originals"
+      - name: Uninstall silently; no install folder is left
+        run: |
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST"
+          if [ -e "$INST" ]; then ls -laR "$INST"; echo "the uninstall left $INST"; exit 1; fi
+          echo "uninstalled: $INST is gone"

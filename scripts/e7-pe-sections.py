@@ -2,10 +2,12 @@
 there. cargo-auditable embeds the dependency list of a binary in a `.dep-v0` section; a shipped PE without it was
 built without `cargo auditable`, so the build fails. The standard library alone: the DOS header's `e_lfanew`, the
 `PE\\0\\0` signature, the COFF header's section count and optional-header size, then 40-byte section headers whose
-first 8 bytes are the name (an image's names are at most 8 bytes, no string-table form).
+first 8 bytes are the name (an image's names are at most 8 bytes, no string-table form). `--machine` (E7-2 part 1b,
+release.yml's install-arm64 job) reads the COFF header's Machine field instead (0x8664 x64, 0xAA64 ARM64, 0x14C x86).
 
     python -I scripts/e7-pe-sections.py --list <pe>                     the section names, one per line
     python -I scripts/e7-pe-sections.py --require <section> <pe>...     exit 1 naming each PE without the section
+    python -I scripts/e7-pe-sections.py --machine <0xNNNN> <pe>...      exit 1 naming each PE of another machine
     python -I scripts/e7-pe-sections.py --self-test
 """
 
@@ -38,18 +40,25 @@ def sections(path):
     return names
 
 
+def machine(path):
+    """The COFF Machine field of the PE at `path` (the same checks as `sections`)."""
+    sections(path)
+    data = Path(path).read_bytes()
+    return struct.unpack_from("<H", data, struct.unpack_from("<I", data, 0x3C)[0] + 4)[0]
+
+
 def missing(section, paths):
     """The paths whose PE has no section named `section`."""
     return [p for p in paths if section not in sections(p)]
 
 
-def fake_pe(names, opt_size=240):
+def fake_pe(names, opt_size=240, arch=0x8664):
     """A minimal PE image: DOS header, signature, COFF header, an optional header of zeros, the section table."""
     pe = 0x80
     head = bytearray(pe)
     head[:2] = b"MZ"
     struct.pack_into("<I", head, 0x3C, pe)
-    coff = struct.pack("<HHIIIHH", 0x8664, len(names), 0, 0, 0, opt_size, 0x22)
+    coff = struct.pack("<HHIIIHH", arch, len(names), 0, 0, 0, opt_size, 0x22)
     table = b"".join(n.encode("ascii").ljust(8, b"\0") + bytes(32) for n in names)
     return bytes(head) + b"PE\0\0" + coff + bytes(opt_size) + table + bytes(64)
 
@@ -82,6 +91,15 @@ def self_test():
         assert bad.returncode == 1 and b"without.dll" in bad.stderr and b"with.exe" not in bad.stderr, bad
         out = subprocess.run(run + ["--list", str(without)], capture_output=True, check=True).stdout
         assert out.replace(b"\r\n", b"\n") == b".text\n.rdata\n.pdata\n", out
+        # --machine: the COFF Machine field.
+        arm = Path(d, "arm.exe")
+        arm.write_bytes(fake_pe([".text"], arch=0xAA64))
+        assert machine(arm) == 0xAA64 and machine(with_dep) == 0x8664
+        ok = subprocess.run(run + ["--machine", "0xAA64", str(arm)], capture_output=True)
+        assert ok.returncode == 0 and b"0xaa64" in ok.stdout, ok
+        bad = subprocess.run(run + ["--machine", "0xaa64", str(arm), str(with_dep)], capture_output=True)
+        assert bad.returncode == 1 and b"with.exe" in bad.stderr and b"0x8664" in bad.stderr, bad
+        assert b"arm.exe" not in bad.stderr, bad
         # A valid header whose section table runs past the end of the data: refused with the message, no traceback.
         truncated = Path(d, "truncated.exe")
         truncated.write_bytes(fake_pe([".text", ".rdata", ".dep-v0"])[: 0x80 + 24 + 240 + 40 * 2])
@@ -116,6 +134,16 @@ def main(argv):
         for p in absent:
             print(f"error: {p} carries no {section} section (sections: {' '.join(sections(p))})", file=sys.stderr)
         return 1 if absent else 0
+    if len(argv) >= 3 and argv[0] == "--machine":
+        want, bad = int(argv[1], 16), 0
+        for p in argv[2:]:
+            got = machine(p)
+            if got == want:
+                print(f"{p}: machine {got:#06x}")
+            else:
+                print(f"error: {p} is machine {got:#06x}, not {want:#06x}", file=sys.stderr)
+                bad = 1
+        return bad
     print(__doc__, file=sys.stderr)
     return 2
 

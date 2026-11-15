@@ -906,3 +906,83 @@ fn the_installer_overlay_places_the_dll_in_this_versions_shell_folder() {
         );
     }
 }
+
+#[test]
+fn the_arm64_entry_file_is_the_define_and_the_include_only() {
+    // E7-2: the hooks cannot see the template's ${ARCH}, so the ARM64 installer's hooks file names its architecture
+    // and includes the shared hooks; nothing else (comments aside).
+    let entry = include_str!("../installer-arm64.nsh");
+    let lines: Vec<&str> = entry
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with(';'))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            r#"!define LPK_INSTALLER_ARCH "arm64""#,
+            r#"!include "${__FILEDIR__}\installer.nsh""#,
+        ]
+    );
+}
+
+#[test]
+fn the_installer_hooks_default_to_x64_only_when_no_architecture_is_defined() {
+    let nsh = include_str!("../installer.nsh");
+    let define = r#"!define LPK_INSTALLER_ARCH "x64""#;
+    assert_eq!(nsh.matches("!define LPK_INSTALLER_ARCH").count(), 1);
+    let at = nsh.find(define).expect(define);
+    let before: Vec<&str> = nsh[..at]
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(before.last(), Some(&"!ifndef LPK_INSTALLER_ARCH"));
+    let after = nsh[at + define.len()..]
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty());
+    assert_eq!(after, Some("!endif"));
+    // The build still stops when the template's architecture is not the one the refusals are for.
+    let pre = nsh_macro(nsh, "NSIS_HOOK_PREINSTALL");
+    assert!(pre.contains(r#"!if "${ARCH}" != "${LPK_INSTALLER_ARCH}""#));
+    assert!(pre.contains(r#"!error "installer.nsh refuses by LPK_INSTALLER_ARCH"#));
+    assert!(pre.find("!error").unwrap() < pre.find("LPK_REFUSE").unwrap());
+}
+
+#[test]
+fn each_architectures_refusal_names_the_other_build() {
+    let nsh = include_str!("../installer.nsh");
+    let refuse = nsh_macro(nsh, "LPK_REFUSE");
+    let x64_if = r#"!if "${LPK_INSTALLER_ARCH}" == "x64""#;
+    let arm64_if = r#"!else if "${LPK_INSTALLER_ARCH}" == "arm64""#;
+    let x64 = refuse
+        .split(x64_if)
+        .nth(1)
+        .and_then(|s| s.split(arm64_if).next())
+        .expect("the x64 branch");
+    let arm64 = refuse
+        .split(arm64_if)
+        .nth(1)
+        .and_then(|s| s.split("\n  !else\n").next())
+        .expect("the arm64 branch");
+    let at = |s: &str, p: &str| s.find(p).unwrap_or_else(|| panic!("{p}"));
+    // x64: refuses on ARM64 (naming the ARM64 build), then on anything that is not x64.
+    assert!(at(x64, "${If} ${IsNativeARM64}") < at(x64, "install the ARM64 build"));
+    assert!(at(x64, "install the ARM64 build") < at(x64, "${ElseIfNot} ${IsNativeAMD64}"));
+    assert!(at(x64, "${ElseIfNot} ${IsNativeAMD64}") < at(x64, "needs 64-bit Windows."));
+    // arm64: refuses on every PC that is not ARM64, naming the x64 build.
+    assert!(at(arm64, "${IfNot} ${IsNativeARM64}") < at(arm64, "install the x64 build."));
+    assert!(arm64.contains(
+        r#""This is the ARM64 build of ${LPK_PRODUCT}. On this PC, install the x64 build." /SD IDOK"#
+    ));
+    for branch in [x64, arm64] {
+        let refusals = branch.matches("MessageBox MB_ICONSTOP|MB_OK").count();
+        assert!(refusals > 0);
+        assert_eq!(branch.matches("SetErrorLevel 1").count(), refusals);
+        assert_eq!(branch.matches(r#"RMDir "${remove}""#).count(), refusals);
+        assert_eq!(branch.matches("Quit").count(), refusals);
+    }
+    // An unknown architecture fails the build.
+    assert!(refuse.contains(r#"!error "installer.nsh knows the architectures x64 and arm64"#));
+}
