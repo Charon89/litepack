@@ -26,6 +26,38 @@ with its reason), or, with --allow-worker-profile, when it belongs to the LitePa
 AppContainer profile (matched by its moniker and the SID its Mappings key names, never by a
 pattern over every AppContainer). Allowed entries are printed with their reason; the exit code
 is 1 if any entry is not allowed.
+
+R380 (CI runs 43683451272 and 43703543786, the installer's and the updater's uninstall diffs): on
+CI's runner Explorer runs its one-time "post app install tasks" for the user when something asks
+for them (an install's new Start menu shortcut does), and that registers Microsoft's own packages
+for the runner's user in the middle of the test (Feedback Hub, Narrator QuickStart, WSL and the
+.NET Native framework and runtime there: 671 records, the same in both runs but one GUID). `diff`
+recognises such a registration from the diff's own entries (`packages()`) and excuses the records
+that belong to it, nothing else:
+  - the packages F: each family `<name>_<publisher id>` with an added folder
+    %LOCALAPPDATA%\\Packages\\<family>, publisher id 8wekyb3d8bbwe or cw5n1h2txyewy (Microsoft's),
+    name not starting with LitePack; with no F the rule excuses nothing;
+  - from the added entries: their full names N (`<name>_<version>_<arch>_<resource>_<id>` as a key
+    path component, family in F), package SIDs S (Mappings keys whose added Moniker is in F), AppX
+    ProgIDs P (HKCU\\Software\\Classes\\AppX<32> whose added Application [AppUserModelID] is
+    `<family>!...`), and app execution aliases A (added reparse points
+    %LOCALAPPDATA%\\Microsoft\\WindowsApps\\<family>\\<alias>);
+  - excused, added entries only: a path with a whole component in F, N, S or P, or an app's
+    AppUserModelID `<family>!<app>` (PushNotifications\\Backup); a value named by a P or whose data
+    holds an F or a P; under RegisteredApplications only a value whose data is the path of a
+    package's capabilities, ...\\Repository\\Packages\\<full name in N>\\... (Windows' Default
+    Programs entries of the packages' apps; LitePack's own `LitePack` value stays residue); an
+    alias's reparse point WindowsApps\\<alias> and its CurrentVersion\\App Paths\\<alias> key and values; a URL protocol Classes\\<scheme> holding only
+    `@ = "URL:<scheme>"` and `URL Protocol`, with UrlAssociations\\<scheme> added too (and that
+    partner key, when it holds nothing); an added key every added descendant of which is excused
+    (one at least by this rule) and that has no unexcused value; an added empty key directly under
+    CapabilityAccessManager\\ConsentStore (a package capability's default); and Explorer's marker
+    [PostAppInstallTasksCompleted];
+  - excused, changed entries, only with F: Explorer\\Package Installation [PackageListVersion],
+    Search [InstalledPackagedAppsRevision], and the notification database's write-ahead log and the
+    Start menu's and Search's tile model caches;
+  - never: a removal, anything naming LitePack, org.litepack.gui, `.lpk` or LitePack's CLSID, the
+    worker's AppContainer profile, RegisteredApplications, Run, RunOnce and HKCU\\Environment.
 """
 
 import argparse
@@ -127,6 +159,9 @@ R367 = "R367, CI run 43683451272"
 # step, while only the running lpk.exe compressed; nothing in LitePack names either key.
 R372 = "R372, CI run 43689320509"
 WIDGETS = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Dsh"
+# R380 (CI run 43699094131's portable job): Storage Sense setting itself up (Parameters\CachedSizes,
+# Parameters\StoragePolicy, SuggestedFolders); nothing in LitePack names it.
+STORAGE_SENSE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\StorageSense"
 SHELL_REFRESH = (re.escape(LOCAL_SETTINGS + r"\Software\Microsoft\Windows\CurrentVersion\AppModel\ShellRefresh")
                  + r"\\[0-9]+")
 CONSENT_STORE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore"
@@ -158,6 +193,9 @@ ALLOW = [
                "under it (" + R372 + ")"},
     {"kind": "value", "path": WIDGETS, "name": "WidgetsStateLastRun", "signs": "+~",
      "reason": "the Widgets board's last-run time, written by Windows while the job's CLI ran (" + R372 + ")"},
+    {"kind": "key", "path": STORAGE_SENSE,
+     "reason": "Windows' Storage Sense, which sets itself up for a user on its own schedule; LitePack writes "
+               "nothing under it (R380, CI run 43699094131)"},
     {"kind": "key-pattern", "path": SHELL_REFRESH, "signs": "+-~",
      "reason": "Windows' package model asking the shell to refresh after a package change (AppModel\\ShellRefresh), "
                "a numbered key Windows adds and removes itself; LitePack installs no package (" + R372 + ")"},
@@ -607,6 +645,230 @@ def allowed(kind, path, name, sign, after, run=None, unreadable=False):
     return None
 
 
+# --- R380: Windows registering its own packages for the runner's user (see the header) ---------
+
+R380_RUNS = "R380, CI runs 43683451272 and 43703543786"
+MS_PUBLISHERS = ("8wekyb3d8bbwe", "cw5n1h2txyewy")
+PACKAGES_DIR = r"%LOCALAPPDATA%\Packages"
+WINDOWS_APPS = r"%LOCALAPPDATA%\Microsoft\WindowsApps"
+CLASSES = r"HKCU\Software\Classes"
+CURRENT_VERSION = r"HKCU\Software\Microsoft\Windows\CurrentVersion"
+APP_PATHS = CURRENT_VERSION + r"\App Paths"
+EXPLORER = CURRENT_VERSION + r"\Explorer"
+URL_ASSOCIATIONS = r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations"
+CAPABILITY_ACCESS = CURRENT_VERSION + r"\CapabilityAccessManager"
+LITEPACK_CLSID = "{01E42821-7D51-4B9B-AD9F-FFCA769A6025}"
+POST_INSTALL_MARKER = (EXPLORER, "PostAppInstallTasksCompleted")
+# Rule 4: what a package registration changes in Windows' own bookkeeping (changed entries only).
+R380_CHANGED_VALUES = [(EXPLORER + r"\Package Installation", "PackageListVersion"),
+                       (CURRENT_VERSION + r"\Search", "InstalledPackagedAppsRevision")]
+R380_CHANGED_FILES = [
+    r"%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db-wal",
+    r"%LOCALAPPDATA%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\TempState"
+    r"\StartUnifiedTileModelCache.dat",
+    r"%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\TempState\SearchUnifiedTileModelCache.dat",
+]
+# Rule 5: keys this rule never excuses anything under. RegisteredApplications (where LitePack registers
+# itself, as `LitePack`) yields only its values whose data is the path of a package's capabilities,
+# Repository\Packages\<full name>\...: Windows' Default Programs entries of the packages' apps.
+REGISTERED_APPS = r"HKCU\Software\RegisteredApplications"
+R380_NEVER_KEYS = [CURRENT_VERSION + r"\Run",
+                   CURRENT_VERSION + r"\RunOnce", r"HKCU\Environment"]
+FULL_NAME = re.compile(r"(?P<name>[^_\\]+)_(?P<version>[0-9]+(\.[0-9]+){3})_(?P<arch>[0-9a-z]+)_"
+                       r"(?P<resource>[^_\\]*)_(?P<id>[0-9a-z]{13})", re.IGNORECASE)
+APPX_PROGID = re.compile(r"AppX[0-9a-z]{32}", re.IGNORECASE)
+
+
+def r380_reason(families, what):
+    """The printed reason of an entry R380 excuses, naming its package (or packages)."""
+    fams = sorted(set(families), key=norm)
+    which = (f"its own package {fams[0]}" if len(fams) == 1
+             else "its own packages " + ", ".join(fams))
+    return f"Windows registering {which} for the runner's user during the run ({R380_RUNS}): {what}"
+
+
+def unquote(data):
+    """A string value's text as `reg export` writes it, without its quotes."""
+    if isinstance(data, str) and len(data) >= 2 and data.startswith('"') and data.endswith('"'):
+        return data[1:-1]
+    return data if isinstance(data, str) else ""
+
+
+def r380_never(kind, path, name, rec, worker_sids):
+    """Rule 5: whether R380 must never excuse this entry, whatever else it names."""
+    texts = [path, name or ""] + ([rec] if kind == "value" and isinstance(rec, str) else [])
+    for t in texts:
+        t = norm(t)
+        if "litepack" in t or norm(LITEPACK_CLSID) in t:  # org.litepack.gui and LitePack.Worker too
+            return True
+    parts = [norm(p) for p in path.split("\\")]
+    if ".lpk" in parts or norm(name or "") == ".lpk":
+        return True
+    if any(p in worker_sids for p in parts):
+        return True
+    if kind != "file" and any(under(path, k) for k in R380_NEVER_KEYS):
+        return True
+    if "registeredapplications" in parts:
+        # Only a value naming a package's full name: what packages() checks for itself (see its end).
+        return kind != "value" or not under(path, REGISTERED_APPS)
+    return False
+
+
+def package_family(leaf):
+    """The family name `leaf` is when it names a Microsoft package that is not LitePack's, or None."""
+    name, sep, publisher = leaf.rpartition("_")
+    if not sep or not name or "_" in name or norm(publisher) not in MS_PUBLISHERS:
+        return None
+    if norm(name).startswith("litepack"):
+        return None
+    return leaf
+
+
+def packages(changes, reasons, skip, worker_sids):
+    """R380 over all of a diff's entries at once: the reason for each entry it excuses, or None.
+    `changes` are diff()'s (sign, path, name, rec, kind); `reasons` the reasons they already have
+    (the allow-list's), used only to see a parent key's descendants as excused; `skip` the indexes
+    nothing may excuse (an unreadable path)."""
+    out = [None] * len(changes)
+    added = [(i, c) for i, c in enumerate(changes) if c[0] == "+"]
+    # F: the families with an added folder under %LOCALAPPDATA%\Packages.
+    fam = {}
+    for _, (sign, path, name, rec, kind) in added:
+        folder, _, leaf = path.rpartition("\\")
+        if kind == "file" and rec.get("kind") == "dir" and norm(folder) == norm(PACKAGES_DIR):
+            f = package_family(leaf)
+            if f:
+                fam[norm(f)] = f
+    if not fam:
+        return out
+    # N, S, P and A, each mapped to its family.
+    full, sids, progids, aliases = {}, {}, {}, {}
+    for _, (sign, path, name, rec, kind) in added:
+        parts = path.split("\\")
+        if kind != "file":
+            for p in parts:
+                m = FULL_NAME.fullmatch(p)
+                if m and norm(m["name"] + "_" + m["id"]) in fam:
+                    full[norm(p)] = fam[norm(m["name"] + "_" + m["id"])]
+        if kind == "value":
+            parent, _, leaf = path.rpartition("\\")
+            if norm(parent) == norm(MAPPINGS) and norm(leaf).startswith("s-1-15-2-") and \
+                    norm(name or "") == "moniker" and norm(unquote(rec)) in fam and \
+                    norm(leaf) not in worker_sids:
+                sids[norm(leaf)] = fam[norm(unquote(rec))]
+            if norm(parent).rpartition("\\")[0] == norm(CLASSES) and \
+                    APPX_PROGID.fullmatch(parent.rpartition("\\")[2]) and norm(leaf) == "application" and \
+                    norm(name or "") == "appusermodelid":
+                f = norm(unquote(rec)).partition("!")
+                if f[1] and f[0] in fam:
+                    progids[norm(parent.rpartition("\\")[2])] = fam[f[0]]
+        if kind == "file" and rec.get("kind") == "reparse":
+            folder, _, leaf = path.rpartition("\\")
+            outer, _, f = folder.rpartition("\\")
+            if norm(outer) == norm(WINDOWS_APPS) and norm(f) in fam:
+                aliases[norm(leaf)] = fam[norm(f)]
+    named = {**{k: (v, "a record under its family name") for k, v in fam.items()},
+             **{k: (v, "a record under its full name") for k, v in full.items()},
+             **{k: (v, "a record under its package SID") for k, v in sids.items()},
+             **{k: (v, "a record under its AppX ProgID") for k, v in progids.items()}}
+    everyone = list(fam.values())
+    keys_added = {norm(c[1]) for _, c in added if c[4] == "key"}
+
+    def contents(key):
+        """The indexes of the added entries strictly inside an added key: its values and subkeys."""
+        k = norm(key)
+        return [i for i, c in added if c[4] != "file" and (norm(c[1]).startswith(k + "\\") or
+                                                           (c[4] == "value" and norm(c[1]) == k))]
+
+    for i, (sign, path, name, rec, kind) in enumerate(changes):
+        if i in skip or r380_never(kind, path, name, rec, worker_sids):
+            continue
+        if sign == "~":
+            if (kind == "value" and any(norm(path) == norm(k) and norm(name or "") == norm(n)
+                                        for k, n in R380_CHANGED_VALUES)) or \
+                    (kind == "file" and any(norm(path) == norm(p) for p in R380_CHANGED_FILES)):
+                out[i] = r380_reason(everyone, "Windows' package bookkeeping, updated by the registration")
+            continue
+        if sign != "+":
+            continue
+        if under(path, REGISTERED_APPS):  # a value (r380_never), excused by this test alone
+            # The path of a package's capabilities, Repository\Packages\<full name>\...; `reg export`
+            # writes each backslash of the text doubled.
+            data = norm(rec) if isinstance(rec, str) else ""
+            f = next((v for k, v in full.items() if f"\\\\packages\\\\{k}\\\\" in data), None)
+            if f:
+                out[i] = r380_reason([f], "Default Programs' entry of one of its apps (its capabilities' path)")
+            continue
+        hit = next((named[norm(p)] for p in path.split("\\") if norm(p) in named), None)
+        # An app's AppUserModelID `<family>!<app>` as a whole component (PushNotifications\Backup).
+        hit = hit or next(((fam[norm(p).partition("!")[0]], "a record under the AppUserModelID of one of its apps")
+                           for p in path.split("\\") if "!" in p and norm(p).partition("!")[0] in fam), None)
+        if hit:
+            out[i] = r380_reason([hit[0]], hit[1])
+            continue
+        if kind == "value":
+            if norm(name or "") in progids:
+                out[i] = r380_reason([progids[norm(name)]], "a value named by its AppX ProgID")
+                continue
+            data = norm(rec) if isinstance(rec, str) else ""
+            f = next((v for k, v in {**fam, **progids}.items() if k in data), None)
+            if f:
+                out[i] = r380_reason([f], "a value naming it")
+                continue
+            if (norm(path), norm(name or "")) == tuple(norm(x) for x in POST_INSTALL_MARKER):
+                out[i] = r380_reason(everyone, "Explorer's marker of its post app install tasks")
+                continue
+        folder, _, leaf = path.rpartition("\\")
+        if kind == "file" and rec.get("kind") == "reparse" and norm(folder) == norm(WINDOWS_APPS) and \
+                norm(leaf) in aliases:
+            out[i] = r380_reason([aliases[norm(leaf)]], f"its app execution alias {leaf}")
+            continue
+        if kind != "file" and norm(folder) == norm(APP_PATHS) and norm(leaf) in aliases:
+            # The key App Paths\<alias> and its values (a value's path is its key).
+            out[i] = r380_reason([aliases[norm(leaf)]], f"the App Paths entry of its alias {leaf}")
+    # URL protocols: Classes\<scheme> holding only its two values, its UrlAssociations key added too.
+    for i, (sign, path, name, rec, kind) in added:
+        folder, _, scheme = path.rpartition("\\")
+        if kind != "key" or norm(folder) != norm(CLASSES) or i in skip or \
+                r380_never(kind, path, name, rec, worker_sids) or \
+                norm(URL_ASSOCIATIONS + "\\" + scheme) not in keys_added:
+            continue
+        inside = contents(path)
+        values = {norm(changes[j][2] or ""): changes[j][3] for j in inside if changes[j][4] == "value"
+                  and norm(changes[j][1]) == norm(path)}
+        if len(inside) != 2 or set(values) != {"", "url protocol"} or \
+                not isinstance(values[""], str) or norm(unquote(values[""])) != norm("URL:" + scheme) or \
+                any(j in skip or r380_never(*(changes[j][k] for k in (4, 1, 2, 3)), worker_sids)
+                    for j in inside):
+            continue
+        what = f"the URL protocol {scheme} one of them declares"
+        for j in [i] + inside:
+            out[j] = r380_reason(everyone, what)
+        partner = next((j for j, c in added if c[4] == "key" and
+                        norm(c[1]) == norm(URL_ASSOCIATIONS + "\\" + scheme)), None)
+        if partner is not None and partner not in skip and not contents(changes[partner][1]) and \
+                not r380_never("key", changes[partner][1], None, True, worker_sids):
+            out[partner] = r380_reason(everyone, what + ": its association key")
+    # An added empty key directly under ConsentStore: a package capability's default.
+    for i, (sign, path, name, rec, kind) in added:
+        if kind == "key" and out[i] is None and i not in skip and \
+                norm(path.rpartition("\\")[0]) == norm(CONSENT_STORE) and not contents(path) and \
+                not r380_never(kind, path, name, rec, worker_sids):
+            out[i] = r380_reason(everyone, "a package capability's default consent key")
+    # Parents: an added key all of whose added contents are excused, one at least by this rule (the
+    # deepest first, so that a parent of parents sees its subkeys' verdicts).
+    parents = sorted((i for i, c in added if c[4] == "key" and out[i] is None and i not in skip and
+                      not r380_never(c[4], c[1], c[2], c[3], worker_sids)),
+                     key=lambda i: -changes[i][1].count("\\"))
+    for i in parents:
+        inside = contents(changes[i][1])
+        mine = [j for j in inside if out[j] is not None]
+        if mine and all(out[j] is not None or reasons[j] for j in inside):
+            fams = sorted({f for j in mine for f in everyone if f in out[j]}, key=norm) or everyone
+            out[i] = r380_reason(fams, "a parent key holding only its records")
+    return out
+
+
 def show(kind, path, name, rec):
     if kind == "value":
         return f"value {path} [{name or '@'}] = {rec}"
@@ -647,19 +909,28 @@ def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uni
     valued = {norm(c[1]) for c in changes if c[4] == "value"}
     unreadable = {norm(p) for s in (before, after) for p, r in s["files"].items()
                   if r.get("kind") == "unreadable"}
-    lines, bad = [], 0
-    for sign, path, name, rec, kind in changes:
-        text = f"{sign} {show(kind, path, name, rec)}"
+    reasons, unreads = [], set()
+    for i, (sign, path, name, rec, kind) in enumerate(changes):
         unread = kind == "file" and norm(path) in unreadable
+        if unread:
+            unreads.add(i)
         reason = allowed(kind, path, name, sign, after, run, unread)
-        ancestor = kind == "key" and sign in "+-" and norm(path) not in valued and \
-            any(under(p, path) and norm(p) != norm(path) for p in profile_keys)
         if not reason and allow_settings and not unread and kind == "file" and sign == "+" and \
                 norm(path) in (norm(SETTINGS_DIR), norm(SETTINGS_FILE)) and settings_only(after):
             reason = SETTINGS_REASON
         if not reason and allow_uninstaller and not unread and kind == "file" and sign == "+" and \
                 uninstaller_copy(path, after):
             reason = UNINSTALLER_REASON
+        reasons.append(reason)
+    # R380 sees every entry at once: its sets of names depend on each other.
+    package_reasons = packages(changes, reasons, unreads, sids)
+    lines, bad = [], 0
+    for i, (sign, path, name, rec, kind) in enumerate(changes):
+        text = f"{sign} {show(kind, path, name, rec)}"
+        unread = i in unreads
+        reason = reasons[i] or package_reasons[i]
+        ancestor = kind == "key" and sign in "+-" and norm(path) not in valued and \
+            any(under(p, path) and norm(p) != norm(path) for p in profile_keys)
         if reason:
             lines.append(f"allowed: {text}  -- {reason}")
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
@@ -1281,6 +1552,209 @@ class Tests(unittest.TestCase):
         ]
         for line in misses:
             self.assertIsNone(allowed(line[1], line[2], line[3], line[0], snap()), line)
+
+    # R380: the printed residue of CI runs 43703543786 and 43683451272 (the `RESIDUE: ` prefix removed).
+    R380_FIXTURES = ("packages-43703543786.txt", "packages-43683451272.txt")
+    FB = "Microsoft.WindowsFeedbackHub_8wekyb3d8bbwe"
+    FB_PROGID = "AppXtmyvd154r75whynphdjyax5d711yvn0s"
+
+    def r380_lines(self, fixture):
+        text = (TESTDATA / fixture).read_text(encoding="utf-8")
+        return [line for line in text.split("\n") if line]
+
+    def r380_residue(self, lines):
+        before, after = snapshots_of(lines)
+        out, bad = diff(before, after, False)
+        residue = {line[len("RESIDUE: "):] for line in out if line.startswith("RESIDUE: ")}
+        self.assertEqual(len(residue), bad, out)
+        return residue
+
+    def test_r380_the_two_runs_package_registrations_are_excused(self):
+        for fixture in self.R380_FIXTURES:
+            lines = self.r380_lines(fixture)
+            self.assertEqual(len(lines), 671, fixture)
+            before, after = snapshots_of(lines)
+            out, bad = diff(before, after, False)
+            self.assertEqual(bad, 0, [line for line in out if line.startswith("RESIDUE")][:5])
+            # Each line parsed back prints as it was printed, and each is excused by R380.
+            shown = sorted(line[len("allowed: "):].partition("  -- ")[0] for line in out)
+            self.assertEqual(shown, sorted(lines), fixture)
+            self.assertTrue(all(R380_RUNS in line for line in out), fixture)
+            # The reason names the package.
+            for line in out:
+                if self.FB_PROGID in line.partition("  -- ")[0] and line.startswith("allowed: + key"):
+                    self.assertIn("its own package " + self.FB + " ", line)
+
+    def test_r380_a_litepack_or_foreign_publisher_family_excuses_nothing(self):
+        lines = self.r380_lines(self.R380_FIXTURES[0])
+        families = (r"Microsoft\.WindowsFeedbackHub|Microsoft\.Windows\.NarratorQuickStart|"
+                    r"MicrosoftCorporationII\.WindowsSubsystemForLinux|"
+                    r"Microsoft\.NET\.Native\.(Framework|Runtime)\.2\.2")
+        for prefix in ("LitePack", "litepack.", "LITEPACKX"):
+            renamed = [re.sub(families, lambda m: prefix + m[0], line, flags=re.IGNORECASE) for line in lines]
+            self.assertEqual(len(self.r380_residue(renamed)), 671, prefix)
+        other = [line.replace("8wekyb3d8bbwe", "0123456789abc") for line in lines]
+        self.assertEqual(len(self.r380_residue(other)), 671)
+        # One family renamed to the worker's moniker: its lines stay residue, the others' do not.
+        worker = [re.sub(r"Microsoft\.WindowsFeedbackHub", "LitePack.Worker", line, flags=re.IGNORECASE)
+                  for line in lines]
+        residue = self.r380_residue(worker)
+        named = {line for line in worker if "litepack" in line.lower()}
+        self.assertTrue(named and named <= residue, sorted(named - residue)[:3])
+        self.assertIn(rf"+ value {CLASSES}\.fh\OpenWithProgids [{self.FB_PROGID}] = hex(0):", residue)
+        self.assertTrue(any("NarratorQuickStart" in line for line in set(worker) - residue))
+
+    def test_r380_removals_and_unnamed_records_stay_residue(self):
+        lines = self.r380_lines(self.R380_FIXTURES[1])
+        removed = [rf"+ reparse {WINDOWS_APPS}\bash.exe",
+                   rf"+ dir {PACKAGES_DIR}\{self.FB}\AC",
+                   rf"+ key {CLASSES}\AppXm4fjth7rfv9b2vppk3w1gcpsf4gy9r3n\Shell"]
+        for r in removed:
+            self.assertIn(r, lines)
+        changed = ["-" + line[1:] if line in removed else line for line in lines]
+        self.assertEqual(self.r380_residue(changed), {"-" + r[1:] for r in removed})
+        bg = CURRENT_VERSION + r"\Authentication\LogonUI\Notifications\BackgroundCapability"
+        cap = CAPABILITY_ACCESS
+        extra = [
+            # A SID that no added Moniker names, under a key where the packages' SIDs are excused.
+            rf"+ value {bg}\S-1-15-2-1-2-3\App.AppXabc.mca [Capabilities] = dword:00000004",
+            rf"+ key {MAPPINGS}\S-1-15-2-9-9-9",
+            rf'+ value {MAPPINGS}\S-1-15-2-9-9-9 [DisplayName] = "x"',
+            # LitePack's own profile, never the packages'.
+            rf"+ dir {PACKAGES_DIR}\LitePack.Worker",
+            rf"+ dir {PACKAGES_DIR}\LitePack.Worker_8wekyb3d8bbwe",
+            rf"+ key {MAPPINGS}\S-1-15-2-5-5-5",
+            rf'+ value {MAPPINGS}\S-1-15-2-5-5-5 [Moniker] = "LitePack.Worker"',
+            # .lpk's OpenWithProgids, with an AppX ProgID not in P and with one in P.
+            rf"+ key {CLASSES}\.lpk",
+            rf"+ key {CLASSES}\.lpk\OpenWithProgids",
+            rf"+ value {CLASSES}\.lpk\OpenWithProgids [AppX0000000000000000000000000000abcd] = hex(0):",
+            rf"+ value {CLASSES}\.lpk\OpenWithProgids [{self.FB_PROGID}] = hex(0):",
+            rf"+ value {CLASSES}\.fh\OpenWithProgids [AppX0000000000000000000000000000abcd] = hex(0):",
+            # URL protocols: an extra value; no UrlAssociations partner; the wrong default.
+            rf"+ key {CLASSES}\examplescheme",
+            rf'+ value {CLASSES}\examplescheme [@] = "URL:examplescheme"',
+            rf'+ value {CLASSES}\examplescheme [URL Protocol] = ""',
+            rf'+ value {CLASSES}\examplescheme [Extra] = "1"',
+            rf"+ key {URL_ASSOCIATIONS}\examplescheme",
+            rf"+ key {CLASSES}\otherscheme",
+            rf'+ value {CLASSES}\otherscheme [@] = "URL:otherscheme"',
+            rf'+ value {CLASSES}\otherscheme [URL Protocol] = ""',
+            rf"+ key {CLASSES}\thirdscheme",
+            rf'+ value {CLASSES}\thirdscheme [@] = "URL:other"',
+            rf'+ value {CLASSES}\thirdscheme [URL Protocol] = ""',
+            rf"+ key {URL_ASSOCIATIONS}\thirdscheme",
+            # A capability key with a value not excused (and its parents then).
+            rf"+ key {CONSENT_STORE}\broadFileSystemAccess",
+            rf'+ value {CONSENT_STORE}\broadFileSystemAccess [Value] = "Deny"',
+            # Rule 5: a family named where this rule never looks; LitePack's names; a bare empty key.
+            rf'+ value {CURRENT_VERSION}\Run [x] = "{self.FB}"',
+            rf'+ value {CURRENT_VERSION}\RunOnce [x] = "{self.FB}"',
+            rf'+ value HKCU\Environment [P] = "{self.FB}"',
+            rf'+ value HKCU\Software\RegisteredApplications [y] = "{self.FB_PROGID}"',
+            rf'+ value HKCU\Software\RegisteredApplications [{self.FB}!App] = "{self.FB}"',
+            r'+ value HKCU\Software\RegisteredApplications [z] = "Software\\Classes\\Local Settings\\Software'
+            r'\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Packages'
+            r'\\Other.App_1.0.0.0_x64__8wekyb3d8bbwe\\App\\Capabilities"',
+            r'+ value HKCU\Software\RegisteredApplications [LitePack] = "Software\\Classes\\Local Settings\\Software'
+            r'\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Packages'
+            r'\\Microsoft.WindowsFeedbackHub_1.2512.16303.0_x64__8wekyb3d8bbwe\\App\\Capabilities"',
+            rf"+ key HKCU\Software\RegisteredApplications\{self.FB}",
+            rf"+ key {CURRENT_VERSION}\PushNotifications\Backup\Other.App_8wekyb3d8bbwe!App",
+            rf"+ key {CURRENT_VERSION}\PushNotifications\Backup\LitePack.Worker_8wekyb3d8bbwe!App",
+            rf"+ key {CURRENT_VERSION}\PushNotifications\Backup\{self.FB}X!App",
+            rf"+ key {CLASSES}\CLSID\{LITEPACK_CLSID}\{self.FB}",
+            rf'+ value {CLASSES}\org.litepack.gui [x] = "{self.FB}"',
+            rf"+ key HKCU\Software\LitePack\{self.FB}",
+            r"+ key HKCU\Software\Foo",
+            rf"+ reparse {WINDOWS_APPS}\notanalias.exe",
+            rf"+ key {APP_PATHS}\notanalias.exe",
+        ]
+        # The parents of a record not excused are not excused either.
+        parents = [rf"+ key {cap}", rf"+ key {CONSENT_STORE}", rf"+ key {CLASSES}\.fh",
+                   rf"+ key {CLASSES}\.fh\OpenWithProgids"]
+        for line in parents:
+            self.assertIn(line, lines)
+        wanted = set(extra) | set(parents)
+        residue = self.r380_residue(lines + extra)
+        self.assertTrue(wanted <= residue, sorted(wanted - residue))
+        # Everything else of the run stays excused.
+        self.assertEqual(residue - wanted, set(), sorted(residue - wanted)[:5])
+
+    def test_r380_changes_and_the_marker_need_a_package(self):
+        lines = self.r380_lines(self.R380_FIXTURES[0])
+        alone = [line for line in lines if line.startswith("~ ") or "PostAppInstallTasksCompleted" in line]
+        self.assertEqual(len(alone), 6)
+        self.assertEqual(self.r380_residue(alone), set(alone))
+        # With the packages, the same records are excused; never removed.
+        self.assertEqual(self.r380_residue(lines), set())
+        marker = next(line for line in alone if line.startswith("+ "))
+        gone = [("-" + line[1:]) if line == marker else line for line in lines]
+        self.assertEqual(self.r380_residue(gone), {"-" + marker[1:]})
+
+    def test_r380_storage_sense_is_allowed_and_a_sibling_is_not(self):
+        guid = "{0E5DF9A8-0B4F-4C0A-9E4E-0C2C3B1A2D3F}"
+        for sign in "+~-":
+            self.assertIsNotNone(allowed("key", STORAGE_SENSE + r"\Parameters\CachedSizes\\" + guid, None, sign,
+                                         snap()))
+            self.assertIsNotNone(allowed("value", STORAGE_SENSE + r"\Parameters\StoragePolicy", "2048", sign,
+                                         snap()))
+            self.assertIsNotNone(allowed("value", STORAGE_SENSE + r"\SuggestedFolders\Music\Suggestions\\" + guid,
+                                         "timeStamp", sign, snap()))
+        for kind, path in (("key", STORAGE_SENSE + "X"), ("value", STORAGE_SENSE + r"X\Parameters"),
+                           ("key", CURRENT_VERSION + r"\Storage")):
+            self.assertIsNone(allowed(kind, path, "01", "+", snap()), path)
+
+    def test_r380_the_parser_reads_shows_format(self):
+        self.assertEqual(parse_shown(r'+ value HKCU\A [@] = "x"'), ("+", "value", r"HKCU\A", "", '"x"'))
+        self.assertEqual(parse_shown(r"~ file %APPDATA%\a b (3 bytes, mtime 7)"),
+                         ("~", "file", r"%APPDATA%\a b", None, {"kind": "file", "size": 3, "mtime": 7}))
+        self.assertEqual(parse_shown(r"+ reparse %X%\r")[4]["kind"], "reparse")
+        self.assertEqual(parse_shown(r"- key HKCU\B"), ("-", "key", r"HKCU\B", None, True))
+
+
+TESTDATA = Path(__file__).resolve().parent / "e7-residue-testdata"
+
+
+def parse_shown(line):
+    """A diff line in show()'s format, with its sign: (sign, kind, path, value name, record)."""
+    sign, _, rest = line.partition(" ")
+    word, _, rest = rest.partition(" ")
+    if word == "value":
+        m = re.fullmatch(r"(.*?) \[(.*?)\] = (.*)", rest, re.DOTALL)
+        return sign, "value", m[1], "" if m[2] == "@" else m[2], m[3]
+    if word == "key":
+        return sign, "key", rest, None, True
+    if word == "file":
+        m = re.fullmatch(r"(.*) \(([0-9]+) bytes, mtime ([0-9]+)\)", rest)
+        return sign, "file", m[1], None, {"kind": "file", "size": int(m[2]), "mtime": int(m[3])}
+    if word in ("dir", "reparse"):
+        return sign, "file", rest, None, {"kind": word}
+    raise ValueError(f"unparsed diff line: {line!r}")
+
+
+def snapshots_of(lines):
+    """The two snapshots whose diff is exactly `lines` (show()'s format, each with its sign)."""
+    before, after = snap(), snap()
+    parsed = [parse_shown(line) for line in lines]
+    keys = {norm(p) for _, kind, p, _, _ in parsed if kind == "key"}
+    for sign, kind, path, name, rec in parsed:
+        if kind == "file":
+            if sign in "+~":
+                after["files"][path] = rec
+            if sign in "-~":
+                before["files"][path] = dict(rec, mtime=rec.get("mtime", 0) + 1) if sign == "~" else rec
+        elif kind == "key":
+            (after if sign == "+" else before)["registry"].setdefault(path, {})
+        else:
+            if norm(path) not in keys:  # the value's key itself is unchanged: on both sides
+                before["registry"].setdefault(path, {})
+                after["registry"].setdefault(path, {})
+            if sign in "+~":
+                after["registry"].setdefault(path, {})[name] = rec
+            if sign in "-~":
+                before["registry"].setdefault(path, {})[name] = rec + " (before)" if sign == "~" else rec
+    return before, after
 
 
 if __name__ == "__main__":
