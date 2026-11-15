@@ -440,10 +440,18 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
     notifications), so a per-record allow-list does not converge there. Its two portable diffs (after the GUI and
     after `--remove-profile`) and its uninstall diff run `e7-residue.py diff --verdict litepack`. There a line not
     allowed is still a verdict when it is LitePack's: `litepack`, `lpk`, LitePack's shell CLSID or its jump list's
-    `a233dcd0c3d36a7d` in its path, value name or data; a file in, or any text naming, the run folder; anything under
-    `Run`, `RunOnce`, `HKCU\Environment`, `RegisteredApplications`, `Classes\.lpk` or `Uninstall`, whatever its name;
-    and the worker profile's SID. Every other line is printed as `OTHER:` for reading and counted in the summary
-    (`N not allowed: M LitePack's, K other`), but fails nothing. The mid-test diff after the installed GUI keeps its
+    `a233dcd0c3d36a7d` in its path, value name or data, or in their ROT13 (Explorer's UserAssist names programs so);
+    a file in, or any text naming (also in ROT13), the run folder; anything under `Run`, `RunOnce`,
+    `HKCU\Environment`, `RegisteredApplications`, `Classes\.lpk` or `Uninstall`, whatever its name; the worker
+    profile's SID; anything in the temp folder's NSIS folders of LitePack's installer and uninstaller (`ns?XXXX.tmp`,
+    `~nsu*.tmp`; the job runs no other NSIS installer); an added AppContainer mapping
+    (`...\AppContainer\Mappings\S-1-15-2-...`, a key or a value in it: the worker's, once emptied, has no `Moniker`
+    left to name it); and any path a snapshot could not read (R410). Every other line is printed as `OTHER:` for
+    reading and counted in the summary (`N not allowed: M LitePack's, K other`), but fails nothing. That includes a
+    removal under a name not LitePack's, such as another program's `.zip` value deleted: it prints as `OTHER` here,
+    because Windows removes records of its own on this runner during the job (CI run 43757926736), while
+    `verify-x64`'s and `ci.yml`'s strict diffs fail on it, and the same code runs on both (R411). The mid-test diff
+    after the installed GUI keeps its
     one verdict, a missing worker profile. `verify-x64`, both its diffs, and every `ci.yml` job stay strict (every
     line not allowed is a verdict); LitePack runs the same code on both architectures, and `verify-x64` passed strict
     on three runs running. The cost if this is wrong: a write LitePack made on ARM64 alone, into a Windows area under

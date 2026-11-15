@@ -7,8 +7,10 @@
 
 --verdict litepack (R408; release.yml's verify-arm64 alone): an entry not allowed is a verdict only when it is
 LitePack's own (`litepack_own`: `litepack`, `lpk`, LitePack's CLSID or its jump list's a233dcd0c3d36a7d in its path,
-value name or data; in or naming the run folder; under Run, RunOnce, HKCU\\Environment, RegisteredApplications,
-Classes\\.lpk or Uninstall; the worker profile's SID). Any other is printed as `OTHER:` and counted, not a verdict.
+value name or data, or in their ROT13 (UserAssist); in or naming the run folder; under Run, RunOnce,
+HKCU\\Environment, RegisteredApplications, Classes\\.lpk or Uninstall; the worker profile's SID; in the temp folder's
+NSIS folders ns?XXXX.tmp and ~nsu*.tmp; an added AppContainer mapping Mappings\\S-1-15-2-...; R410), and an unreadable
+path always is. Any other is printed as `OTHER:` and counted, not a verdict: a removal under another name too (R411).
 
 `snapshot` refuses unless GITHUB_ACTIONS=true or --on-ci is given: use it only on a disposable
 machine. Every path it cannot read is printed and recorded; `diff` reports such a path as
@@ -1003,11 +1005,28 @@ def expand_root(path):
     return folder.rstrip("\\") + m.group(2) if folder else None
 
 
-def litepack_own(kind, path, name, rec, run, worker_sids=()):
-    """R408: whether a residue line is LitePack's own: a LitePack mark in its path, value name or data; or it lies
-    in (a file) or names (any text) the run folder; or it lies under a key of `verdict_keys()`; or it is the worker
-    profile's (its SID)."""
+# R410: the temp folder's NSIS folders LitePack's own installer and uninstaller make (the verify jobs run no other
+# NSIS installer): the plugin folder (R401, R404) and the uninstaller's copy (R312).
+NSIS_TEMP_DIRS = (NSIS_PLUGINS_DIR, r"~nsu[0-9a-z]*\.tmp")
+
+
+def litepack_own(kind, path, name, rec, run, worker_sids=(), sign="+"):
+    """R408, R410: whether a residue line is LitePack's own: a LitePack mark in its path, value name or data, or in
+    their ROT13 (UserAssist's value names); or it lies in (a file) or names (any text, or its ROT13) the run folder;
+    or it lies under a key of `verdict_keys()`; or it is the worker profile's (its SID); or it lies in one of the
+    temp folder's NSIS folders (`NSIS_TEMP_DIRS`); or it is an added AppContainer mapping, a key
+    Mappings\\S-1-15-2-... or a value in it (the worker's, emptied, has no Moniker left to name it)."""
     texts = [path, name or ""] + ([rec] if kind == "value" and isinstance(rec, str) else [])
+    texts += [rot13(t) for t in texts]
+    if kind == "file":
+        rel = path[len(USER_TEMP) + 1:] if under(path, USER_TEMP) and norm(path) != norm(USER_TEMP) else None
+        if rel is not None and any(re.fullmatch(p, rel.split("\\")[0], re.IGNORECASE) for p in NSIS_TEMP_DIRS):
+            return True
+    elif sign == "+":
+        # A value's path is its key's.
+        parent, _, leaf = path.rpartition("\\")
+        if norm(parent) == norm(MAPPINGS) and norm(leaf).startswith("s-1-15-2-"):
+            return True
     for t in texts:
         t = norm(t)
         if any(m in t for m in LITEPACK_MARKS):
@@ -1077,7 +1096,8 @@ def diff(before, after, allow_profile, run=None, allow_settings=False, allow_uni
         elif allow_profile and (is_profile(kind, path, sids) or ancestor) and \
                 not unread:
             lines.append(f"profile: {text}")
-        elif verdict == "litepack" and not litepack_own(kind, path, name, rec, run, sids):
+        # R410: an unreadable path stays a verdict in every mode (what lies inside it was not seen).
+        elif verdict == "litepack" and not unread and not litepack_own(kind, path, name, rec, run, sids, sign):
             lines.append(f"OTHER: {text}")
         else:
             lines.append(f"RESIDUE: {text}")
@@ -2155,6 +2175,67 @@ class Tests(unittest.TestCase):
         lines, bad = self.r408(registry={self.R408_CLOUD: {"Data": "hex:01,02"}}, verdict="all")
         self.assertEqual(bad, 2, lines)
         self.assertTrue(all(line.startswith("RESIDUE: ") for line in lines), lines)
+
+    def test_r410_an_unreadable_path_stays_a_verdict_in_litepack_mode(self):
+        start = r"%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+        unread = {start: {"kind": "unreadable", "error": "PermissionError"}}
+        for verdict in ("litepack", "all"):
+            lines, bad = self.r408(before_files=unread, verdict=verdict)
+            self.assertEqual((bad, lines), (1, [f"RESIDUE: ? unreadable {start} (PermissionError)"]), verdict)
+
+    def test_r410_userassist_rot13_names_are_litepacks(self):
+        for program in (r"C:\Users\runneradmin\AppData\Local\LitePack\uninstall.exe",
+                        r"D:\a\_temp\assets\LitePack_0.0.1_arm64-setup.exe",
+                        r"{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}\LitePack.lnk"):
+            lines, bad = self.r408(registry={USERASSIST_COUNT: {rot13(program): "hex:00,01"}})
+            self.assertEqual(bad, 1, (program, lines))
+            self.assertTrue(lines[-1].startswith("RESIDUE: + value"), lines)
+        # The run folder too, through ROT13, for a program in it without a mark of its own.
+        lines, bad = self.r408(registry={USERASSIST_COUNT: {rot13(r"C:\U\Apps\Run\tool.exe"): "hex:00"}},
+                               run="C:/U/Apps/Run")
+        self.assertEqual(bad, 1, lines)
+        # A UserAssist value of another program stays OTHER.
+        lines, bad = self.r408(registry={USERASSIST_COUNT: {rot13(r"C:\Windows\notepad.exe"): "hex:00"}})
+        self.assertEqual(bad, 0, lines)
+        self.assertTrue(lines and all(line.startswith("OTHER: ") for line in lines), lines)
+
+    def test_r410_anything_in_litepacks_nsis_temp_folders_is_a_verdict(self):
+        t = USER_TEMP
+        plugins = {t + r"\nsi2CA.tmp": {"kind": "dir"}, t + r"\nsi2CA.tmp\System.dll": f(12288),
+                   t + r"\nsi2CA.tmp\nsDialogs.dll": f()}
+        lines, bad = self.r408(files=plugins)
+        self.assertEqual(bad, 1, lines)
+        self.assertIn(r"RESIDUE: + file %LOCALAPPDATA%\Temp\nsi2CA.tmp\nsDialogs.dll", "\n".join(lines))
+        copy = {t + r"\~nsuA.tmp": {"kind": "dir"}, t + r"\~nsuA.tmp\Un.exe": f(), t + r"\~nsuA.tmp\extra.txt": f()}
+        before = snap(self.base["files"], self.base["registry"])
+        after = snap(dict(self.base["files"], **copy), self.base["registry"])
+        lines, bad = diff(before, after, False, allow_uninstaller=True, verdict="litepack")
+        self.assertEqual(bad, 3, lines)
+        self.assertFalse(any(line.startswith("OTHER: ") for line in lines), lines)
+        # Another temp folder of no NSIS shape stays OTHER.
+        lines, bad = self.r408(files={t + r"\tmpAB12.tmp": {"kind": "dir"}, t + r"\tmpAB12.tmp\x.dll": f()})
+        self.assertEqual(bad, 0, lines)
+        self.assertEqual(sum(1 for line in lines if line.startswith("OTHER: ")), 2, lines)
+
+    def test_r410_an_added_appcontainer_mapping_is_a_verdict(self):
+        sid_key = MAPPINGS + r"\S-1-15-2-11-22-33-44-55-66-77"
+        for registry in ({sid_key: {}}, {sid_key: {"DisplayName": '"x"'}}):
+            lines, bad = self.r408(registry=registry)
+            self.assertEqual(bad, len(lines), lines)
+        # Another package's mapping removed (Windows' own) stays OTHER; so does a key deeper than the mapping.
+        before = snap(self.base["files"], dict(self.base["registry"], **{sid_key: {}}))
+        lines, bad = diff(before, self.base, False, verdict="litepack")
+        self.assertEqual((bad, lines), (0, [f"OTHER: - key {sid_key}"]))
+        lines, bad = self.r408(before_registry={sid_key: {}}, registry={sid_key + r"\Children": {}})
+        self.assertEqual(bad, 0, lines)
+
+    def test_r411_a_removal_under_another_name_is_other_in_litepack_mode_and_a_verdict_by_default(self):
+        progids = CLASSES + r"\.zip\OpenWithProgids"
+        before = snap(self.base["files"], dict(self.base["registry"], **{progids: {"Other.zip": "hex(0):"}}))
+        after = snap(self.base["files"], dict(self.base["registry"], **{progids: {}}))
+        line = r"- value HKCU\Software\Classes\.zip\OpenWithProgids [Other.zip] = hex(0):"
+        self.assertEqual(diff(before, after, False, verdict="litepack"), ([f"OTHER: {line}"], 0))
+        self.assertEqual(diff(before, after, False), ([f"RESIDUE: {line}"], 1))
 
     def test_r408_the_cli_counts_both_and_fails_only_on_litepacks(self):
         with tempfile.TemporaryDirectory() as d:
