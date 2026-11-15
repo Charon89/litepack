@@ -18,7 +18,10 @@ from pathlib import Path
 
 def sections(path):
     """The section names of the PE at `path`; a file that is not a PE is an error (SystemExit)."""
-    data = Path(path).read_bytes()
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        raise SystemExit(f"e7-pe-sections: cannot read {path}: {e.strerror or e}")
     if len(data) < 0x40 or data[:2] != b"MZ":
         raise SystemExit(f"e7-pe-sections: {path} is not a PE (no MZ header)")
     pe = struct.unpack_from("<I", data, 0x3C)[0]
@@ -79,6 +82,20 @@ def self_test():
         assert bad.returncode == 1 and b"without.dll" in bad.stderr and b"with.exe" not in bad.stderr, bad
         out = subprocess.run(run + ["--list", str(without)], capture_output=True, check=True).stdout
         assert out.replace(b"\r\n", b"\n") == b".text\n.rdata\n.pdata\n", out
+        # A valid header whose section table runs past the end of the data: refused with the message, no traceback.
+        truncated = Path(d, "truncated.exe")
+        truncated.write_bytes(fake_pe([".text", ".rdata", ".dep-v0"])[: 0x80 + 24 + 240 + 40 * 2])
+        try:
+            sections(truncated)
+        except SystemExit as e:
+            assert "runs past the end" in str(e), e
+        else:
+            raise AssertionError("a truncated section table was read")
+        cut = subprocess.run(run + ["--list", str(truncated)], capture_output=True)
+        assert cut.returncode != 0 and b"runs past the end" in cut.stderr and b"Traceback" not in cut.stderr, cut
+        # A path that does not exist: a non-zero exit with a message, no traceback.
+        gone = subprocess.run(run + ["--require", ".dep-v0", str(Path(d, "absent.exe"))], capture_output=True)
+        assert gone.returncode != 0 and b"cannot read" in gone.stderr and b"Traceback" not in gone.stderr, gone
     print("e7-pe-sections: self-test passed")
 
 

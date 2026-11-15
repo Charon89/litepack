@@ -71,7 +71,11 @@ jobs:
         run: |
           t="$(cygpath -u "$RUNNER_TEMP")"
           cat "$t/first/SHA256SUMS"
-          echo "$(wc -l < "$t/first/SHA256SUMS") binaries compared"
+          for s in first second; do
+            n=$(wc -l < "$t/$s/SHA256SUMS")
+            [ "$n" = 6 ] || { echo "error: expected 6 binaries in the $s build's SHA256SUMS, got $n" >&2; exit 1; }
+          done
+          echo "6 binaries compared"
           if diff "$t/first/SHA256SUMS" "$t/second/SHA256SUMS"; then
             echo "reproducible: every shipped binary is identical across the two builds"
           else
