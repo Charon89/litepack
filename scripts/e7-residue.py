@@ -119,6 +119,10 @@ R365 = "R365, CI run 43676006117"
 # that layout, so the runtime's, not LitePack's (whose own jump list the uninstaller removes).
 WEBVIEW2_AUMID = "MSEDGEWEBVIEW.EBWEBVIEW.DEFAULT"
 WEBVIEW2_JUMP_LIST = "2a2e0412b8ad04a2"
+# Windows Search's record of each jump list's last update, one value per AppUserModelID; LitePack's own
+# (org.litepack.gui) is deleted by the uninstaller (installer.nsh), so it stays residue.
+SEARCH_JUMPLIST_DATA = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search\JumplistData"
+R367 = "R367, CI run 43683451272"
 CONSENT_STORE = r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore"
 CONSENT = ("Windows' privacy consent defaults, which its capability access manager writes the first "
            "time a desktop program asks for camera, microphone or location state; LitePack asks for "
@@ -137,6 +141,11 @@ ALLOW = [
      "reason": "the WebView2 runtime's jump list, named by the CRC-64 of its AppUserModelID "
                + WEBVIEW2_AUMID + ", the same for every WebView2 app with the folders EBWebView\\Default; "
                "the runtime's, not LitePack's (" + R365 + ")"},
+    {"kind": "value", "path": SEARCH_JUMPLIST_DATA, "name": "MSEdgeWebView.EBWebView.Default",
+     "signs": "+~",
+     "reason": "Windows Search's record of the WebView2 runtime's jump list (the file above), a value "
+               "named by the same AppUserModelID and written some time after the list; the runtime's, "
+               "not LitePack's (" + R367 + ")"},
     {"kind": "file", "path": r"%LOCALAPPDATA%\D3DSCache",
      "reason": "Direct3D's shader cache, which Windows' graphics runtime keeps for any program that "
                "draws with Direct3D; most likely written by WebView2's GPU process, about 120 s after "
@@ -1203,6 +1212,27 @@ class Tests(unittest.TestCase):
         # With no temp folder known, the MuiCache entry matches nothing.
         with unittest.mock.patch.object(sys.modules[__name__], "temp_folder", lambda: None):
             self.assertIsNone(allowed("value", SHELL_MUICACHE, self.R365_TEMP + mui, "+", snap()))
+
+    def test_r367_windows_search_record_of_the_webview2_jump_list(self):
+        # CI run 43683451272's one line, as printed, and the same value changed.
+        for sign in "+~":
+            self.assertIsNotNone(allowed("value", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Default",
+                                         sign, snap()))
+        self.assertEqual(WEBVIEW2_AUMID, "MSEdgeWebView.EBWebView.Default".upper())
+        misses = [
+            ("-", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Default"),
+            # LitePack's own record, which the uninstaller deletes.
+            ("+", SEARCH_JUMPLIST_DATA, "org.litepack.gui"),
+            ("~", SEARCH_JUMPLIST_DATA, "org.litepack.gui"),
+            ("+", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Profile 1"),
+            ("+", SEARCH_JUMPLIST_DATA, "MSEdgeWebView.EBWebView.Default.x"),
+            ("+", SEARCH_JUMPLIST_DATA + r"\Sub", "MSEdgeWebView.EBWebView.Default"),
+            ("+", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Search", "MSEdgeWebView.EBWebView.Default"),
+        ]
+        for sign, key, name in misses:
+            self.assertIsNone(allowed("value", key, name, sign, snap()), (sign, key, name))
+        # The key itself is not excused: only that one value in it.
+        self.assertIsNone(allowed("key", SEARCH_JUMPLIST_DATA, None, "+", snap()))
 
 
 if __name__ == "__main__":
