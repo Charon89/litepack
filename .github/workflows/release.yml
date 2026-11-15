@@ -5,14 +5,17 @@ name: Release
 # reproducible job compares them (scripts/e7-release-build.sh, through scripts/repro-build.sh), bundles both
 # per-user NSIS installers from those very binaries, and runs the ARM64 installer on both architectures: refused on
 # x64, installed and uninstalled on ARM64. Nothing is signed, nothing is published: no release, no tag, no GitHub
-# deployment target, no stored credential, no OIDC token, no cache (part 2 adds signing and publishing; later parts of
-# part 1 add the zips, SHA256SUMS, the SBOMs and the residue checks). Every action is pinned by its commit SHA, the
-# tag in a comment; the preflight job checks this file for that (scripts/e7-preflight.py workflow).
+# deployment target, no stored credential, no OIDC token, no cache (part 2 adds signing and publishing). Part 1c adds
+# the release's assets: both zips per architecture beside the installers, SHA256SUMS, the notices finder and the
+# classification of every PE inside them (assemble), and a smoke run of the zips on both architectures (smoke-x64,
+# smoke-arm64); parts 1d and 1e add the SBOMs and the install checks with the residue diff. Every action is pinned by
+# its commit SHA, the tag in a comment; the preflight job checks this file for that (scripts/e7-preflight.py workflow).
 on:
   pull_request:
     paths:
       - .github/workflows/release.yml
       - scripts/repro-build.sh
+      - scripts/make-zips.py
       - scripts/release-tools.env
       - scripts/cargo-auditable.cmd
       - scripts/e7-*
@@ -24,6 +27,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - scripts/repro-build.sh
+      - scripts/make-zips.py
       - scripts/release-tools.env
       - scripts/cargo-auditable.cmd
       - scripts/e7-*
@@ -472,3 +476,293 @@ jobs:
           scripts/e7-wait-uninstaller.sh "$INST"
           if [ -e "$INST" ]; then ls -laR "$INST"; echo "the uninstall left $INST"; exit 1; fi
           echo "uninstalled: $INST is gone"
+
+  # The release's assets (part 1c): the portable and CLI zip of each architecture (scripts/make-zips.py, from the build
+  # jobs' binaries) beside the two installers, and SHA256SUMS over the six (scripts/e7-assets.py). Then what is inside
+  # them: each holds the notices and both licences once, byte-equal to the repository's (E7-8 part 2), and every PE
+  # inside is either a shipped one of its architecture with .dep-v0, byte-equal to the build's, or one of NSIS's own
+  # x86 parts (scripts/e7-artefacts.py). The job's output is the hash of SHA256SUMS, which the smoke jobs check.
+  assemble:
+    name: release assets (windows-2025)
+    needs: [preflight, build-x64, build-arm64, package]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      sums: ${{ steps.sums.outputs.sha256 }}
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TIMESTAMP: ${{ needs.preflight.outputs.timestamp }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # One exact Python build: the zips' bytes depend on its zlib and its zipfile (as ci.yml's portable job).
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: Work folders and 7-Zip
+        run: |
+          echo "T=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+          sz="$(cygpath -m "$PROGRAMFILES")/7-Zip/7z.exe"
+          test -f "$sz" || { echo "no 7-Zip at $sz"; exit 1; }
+          echo "SZ=$sz" >> "$GITHUB_ENV"
+          echo "version $VERSION, source commit time $TIMESTAMP"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: unsigned-x64
+          path: ${{ runner.temp }}/unsigned-x64
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: unsigned-arm64
+          path: ${{ runner.temp }}/unsigned-arm64
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: installers
+          path: ${{ runner.temp }}/installers
+      - name: Check every download against its list and every list against its job's output
+        env:
+          X64_LIST: ${{ needs.build-x64.outputs.list }}
+          ARM64_LIST: ${{ needs.build-arm64.outputs.list }}
+          INSTALLERS_LIST: ${{ needs.package.outputs.list }}
+        run: |
+          set -euo pipefail
+          check() {
+            local dir="$1" list="$2" want="$3"
+            test -n "$want" || { echo "no expected hash for $dir/$list"; exit 1; }
+            got="$(sha256sum "$dir/$list" | cut -d ' ' -f 1)"
+            test "$got" = "$want" || { echo "$dir/$list: $got, the job's output is $want"; exit 1; }
+            (cd "$dir" && sha256sum -c "$list")
+          }
+          check "$T/unsigned-x64" unsigned.sha256 "$X64_LIST"
+          check "$T/unsigned-arm64" unsigned.sha256 "$ARM64_LIST"
+          check "$T/installers" installers.sha256 "$INSTALLERS_LIST"
+          test "$(wc -l < "$T/unsigned-x64/unsigned.sha256")" = 6
+          test "$(wc -l < "$T/unsigned-arm64/unsigned.sha256")" = 6
+          test "$(wc -l < "$T/installers/installers.sha256")" = 2
+      - name: The asset, notices, PE and zip scripts' own tests
+        run: |
+          python -I scripts/make-zips.py --self-test
+          python -I scripts/e7-assets.py --self-test
+          python -I scripts/e7-artefacts.py --self-test --sevenzip "$SZ"
+      - name: Both zips per architecture, and the two installers
+        run: |
+          set -euo pipefail
+          mkdir -p "$T/assets"
+          for arch in x64 arm64; do
+            python -I scripts/make-zips.py --bin "$T/unsigned-$arch" --arch "$arch" --version "$VERSION" \
+              --timestamp "$TIMESTAMP" --out "$T/assets"
+          done
+          while read -r hash file; do cp "$T/installers/${file#\*}" "$T/assets/"; done < "$T/installers/installers.sha256"
+          for z in "$T/assets/"*.zip; do python -I -m zipfile -l "$z"; done
+          ls -la "$T/assets"
+      - name: SHA256SUMS over exactly the expected assets
+        id: sums
+        run: |
+          set -euo pipefail
+          python -I scripts/e7-assets.py expected --version "$VERSION"
+          python -I scripts/e7-assets.py sums --version "$VERSION" "$T/assets"
+          python -I scripts/e7-assets.py check --version "$VERSION" "$T/assets"
+          (cd "$T/assets" && sha256sum -c SHA256SUMS)
+          echo "sha256=$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: The notices and licences, once each in every artefact (E7-8 part 2)
+        run: python -I scripts/e7-artefacts.py notices "$T/assets" --repo "$(cygpath -m "$PWD")" --sevenzip "$SZ"
+      # Also prints 7-Zip's full listing of each installer, so the classes can be read against it.
+      - name: Every PE inside the artefacts, classified
+        run: |
+          python -I scripts/e7-artefacts.py pes "$T/assets" --unsigned-x64 "$T/unsigned-x64" \
+            --unsigned-arm64 "$T/unsigned-arm64" --sevenzip "$SZ"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+          retention-days: 14
+          if-no-files-found: error
+
+  # The zips on each architecture, as a user gets them: SHA256SUMS checked, then from the CLI zip every PE at the
+  # runner's machine, `lpk --version`, a round trip, lpk-check, and a .zip through the sandboxed worker; from the
+  # portable zip the GUI opens the .lpk and the .zip (as ci.yml's portable job), then the worker's profile is removed.
+  smoke-x64:
+    name: zips smoke x64 (windows-2025)
+    needs: [preflight, assemble]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+      ARCH: x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.7"
+      - name: Work folders
+        run: echo "T=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+      - name: Check SHA256SUMS against the assemble job's output, then every asset
+        env:
+          SUMS: ${{ needs.assemble.outputs.sums }}
+        run: |
+          test -n "$SUMS"
+          test "$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" = "$SUMS" || { echo "SHA256SUMS is not the assemble job's"; exit 1; }
+          (cd "$T/assets" && sha256sum -c SHA256SUMS)
+          test "$(wc -l < "$T/assets/SHA256SUMS")" = 6
+      # Windows' own tar.exe (bsdtar) reads zips: the same unzip on both runners, without Python.
+      - name: Unzip the CLI and portable zips of this architecture
+        run: |
+          set -euo pipefail
+          tar="$(cygpath -m "$SYSTEMROOT")/System32/tar.exe"
+          for kind in cli portable; do
+            mkdir -p "$T/$kind"
+            "$tar" -xf "$T/assets/litepack-$VERSION-windows-$ARCH-$kind.zip" -C "$T/$kind"
+            ls -la "$T/$kind/LitePack"
+          done
+      - name: The CLI zip's PEs are x64 (e7-pe-sections.py --machine)
+        run: |
+          c="$T/cli/LitePack"
+          python -I scripts/e7-pe-sections.py --machine 0x8664 "$c/lpk.exe" "$c/lpk-check.exe" "$c/lpk-worker.exe" \
+            "$c/lpk-worker-libarchive.exe"
+      - name: lpk --version, a round trip, lpk-check, and a .zip through the worker (the CLI zip)
+        run: |
+          set -euo pipefail
+          c="$T/cli/LitePack"
+          line="$("$c/lpk.exe" --version | tr -d '\r')"
+          echo "$line"
+          case "$line" in "lpk $VERSION+"*) ;; *) echo "lpk --version does not name $VERSION"; exit 1 ;; esac
+          w="$T/work"
+          mkdir -p "$w/in/sub"
+          for i in 1 2 3; do echo "file $i" > "$w/in/sub/f$i.txt"; done
+          printf 'top\n' > "$w/in/top.txt"
+          same() {
+            (cd "$w/in" && find . -type f) | while read -r f; do cmp "$w/in/$f" "$1/$f" || exit 1; done
+            test "$(cd "$w/in" && find . -type f | wc -l)" = "$(cd "$1" && find . -type f | wc -l)"
+            echo "$1: the files equal the originals"
+          }
+          "$c/lpk.exe" a "$w/small.lpk" "$w/in"
+          "$c/lpk.exe" x "$w/small.lpk" "$w/out-lpk"
+          same "$w/out-lpk"
+          "$c/lpk-check.exe" verify "$w/small.lpk"
+          "$c/lpk.exe" export "$w/small.lpk" "$w/small.zip"
+          "$c/lpk.exe" x "$w/small.zip" "$w/out-zip"
+          same "$w/out-zip"
+          ls -la "$w"
+      - name: The portable GUI opens the .lpk, then the .zip
+        run: |
+          set -euo pipefail
+          w="$T/work"
+          gui="$T/portable/LitePack/lpk-gui.exe"
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$w/report-$a.json" timeout 180 "$gui" "$w/$a"
+            report="$(cat "$w/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          ls -la "$T/portable/LitePack" "$T/portable/LitePack/data"
+      - name: The worker's profile removed from the portable copy
+        if: ${{ !cancelled() }}
+        run: '"$T/portable/LitePack/lpk-worker.exe" --remove-profile'
+
+  smoke-arm64:
+    name: zips smoke arm64 (windows-11-arm)
+    needs: [preflight, assemble]
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      VERSION: ${{ needs.preflight.outputs.version }}
+      ARCH: arm64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # No setup-python here: it could not install 3.13.7 on windows-11-arm; this job uses bash, coreutils and
+      # Windows' tar.exe only.
+      - name: Work folders
+        run: echo "T=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+      - name: Check SHA256SUMS against the assemble job's output, then every asset
+        env:
+          SUMS: ${{ needs.assemble.outputs.sums }}
+        run: |
+          test -n "$SUMS"
+          test "$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" = "$SUMS" || { echo "SHA256SUMS is not the assemble job's"; exit 1; }
+          (cd "$T/assets" && sha256sum -c SHA256SUMS)
+          test "$(wc -l < "$T/assets/SHA256SUMS")" = 6
+      - name: Unzip the CLI and portable zips of this architecture
+        run: |
+          set -euo pipefail
+          tar="$(cygpath -m "$SYSTEMROOT")/System32/tar.exe"
+          for kind in cli portable; do
+            mkdir -p "$T/$kind"
+            "$tar" -xf "$T/assets/litepack-$VERSION-windows-$ARCH-$kind.zip" -C "$T/$kind"
+            ls -la "$T/$kind/LitePack"
+          done
+      # The COFF Machine field read with od, as install-arm64 does (no Python on this runner).
+      - name: The CLI zip's PEs are ARM64 (od)
+        run: |
+          set -euo pipefail
+          for p in lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe; do
+            b="$T/cli/LitePack/$p"
+            pe=$(od -An -tu4 -j60 -N4 "$b" | tr -d ' ')
+            m=$(od -An -tx2 -j$((pe + 4)) -N2 "$b" | tr -d ' ')
+            echo "$p: machine 0x$m"
+            [ "$m" = "aa64" ] || { echo "error: $p is not ARM64" >&2; exit 1; }
+          done
+      - name: lpk --version, a round trip, lpk-check, and a .zip through the worker (the CLI zip)
+        run: |
+          set -euo pipefail
+          c="$T/cli/LitePack"
+          line="$("$c/lpk.exe" --version | tr -d '\r')"
+          echo "$line"
+          case "$line" in "lpk $VERSION+"*) ;; *) echo "lpk --version does not name $VERSION"; exit 1 ;; esac
+          w="$T/work"
+          mkdir -p "$w/in/sub"
+          for i in 1 2 3; do echo "file $i" > "$w/in/sub/f$i.txt"; done
+          printf 'top\n' > "$w/in/top.txt"
+          same() {
+            (cd "$w/in" && find . -type f) | while read -r f; do cmp "$w/in/$f" "$1/$f" || exit 1; done
+            test "$(cd "$w/in" && find . -type f | wc -l)" = "$(cd "$1" && find . -type f | wc -l)"
+            echo "$1: the files equal the originals"
+          }
+          "$c/lpk.exe" a "$w/small.lpk" "$w/in"
+          "$c/lpk.exe" x "$w/small.lpk" "$w/out-lpk"
+          same "$w/out-lpk"
+          "$c/lpk-check.exe" verify "$w/small.lpk"
+          "$c/lpk.exe" export "$w/small.lpk" "$w/small.zip"
+          "$c/lpk.exe" x "$w/small.zip" "$w/out-zip"
+          same "$w/out-zip"
+          ls -la "$w"
+      # The GUI's first run on windows-11-arm: a failure of the runner (no WebView2, no session) is reported, not
+      # worked around; the CLI checks above stand on their own.
+      - name: The portable GUI opens the .lpk, then the .zip
+        run: |
+          set -euo pipefail
+          w="$T/work"
+          gui="$T/portable/LitePack/lpk-gui.exe"
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$w/report-$a.json" timeout 180 "$gui" "$w/$a"
+            report="$(cat "$w/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q "\"archive\":\"$a\"" <<<"$report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          ls -la "$T/portable/LitePack" "$T/portable/LitePack/data"
+      - name: The worker's profile removed from the portable copy
+        if: ${{ !cancelled() }}
+        run: '"$T/portable/LitePack/lpk-worker.exe" --remove-profile'

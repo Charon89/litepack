@@ -314,7 +314,7 @@ without publishing anything. Its permissions are `contents: read`, and it uses n
 credential, no OIDC token and no cache. Every action is pinned by its 40-hex commit SHA, with the tag in a comment.
 
 **Triggers.** A pull request or a push to `main` that touches the workflow, `scripts/repro-build.sh`,
-`scripts/release-tools.env`, `scripts/cargo-auditable.cmd`, `scripts/e7-*`, `crates/lpk-gui/installer*.nsh`,
+`scripts/make-zips.py`, `scripts/release-tools.env`, `scripts/cargo-auditable.cmd`, `scripts/e7-*`, `crates/lpk-gui/installer*.nsh`,
 `crates/lpk-gui/tauri*.conf.json` or `rust-toolchain.toml`; and `workflow_dispatch`.
 
 **Jobs.**
@@ -339,6 +339,36 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
 - `install-arm64` (windows-11-arm): the ARM64 installer run with `/S` installs. Each installed PE is machine 0xAA64
   (the COFF Machine field read with `od`, as `arm64-smoke` does: the job has no Python) and byte-equal to the build's. `bin\lpk.exe --version` runs, and `bin\lpk.exe`
   round-trips a small folder. A silent uninstall (waited on with `e7-wait-uninstaller.sh`) leaves no install folder.
+- `assemble` (windows-2025, part 1c): checks `unsigned-x64`, `unsigned-arm64` and `installers` against their lists
+  and the lists against the build and `package` jobs' outputs. It runs the self-tests of `make-zips.py`,
+  `scripts/e7-assets.py` and `scripts/e7-artefacts.py`, then `make-zips.py` per architecture (`--bin` the build job's
+  artifact, the version and the commit time from `preflight`) and copies the two installers beside the zips.
+  `e7-assets.py sums` writes `SHA256SUMS` over exactly the six expected assets and `check` reads it back. Then
+  `e7-artefacts.py notices`, E7-8 part 2's finder: every artefact holds `THIRD-PARTY-NOTICES`, `LICENSE-APACHE` and
+  `LICENSE-MIT` exactly once each, byte-equal to the repository's (the zips read with `zipfile`, the installers
+  through the runner's 7-Zip). And `e7-artefacts.py pes`: every PE inside each artefact is classified. A `shipped`
+  PE is one of the six names, at the artefact's machine (0x8664 or 0xAA64), carries `.dep-v0` and is byte-equal to
+  the build's, each name the artefact should hold exactly once. An `nsis-plugin` is an x86 (0x14C) PE under
+  `$PLUGINSDIR` in an installer. The `nsis-uninstaller` is the `uninstall.exe` NSIS writes at install time (its x86
+  stub, at the installer's root, at most one). Anything else fails. It prints each PE with its class, machine and
+  SHA-256, a count per class, and 7-Zip's full listing of each installer. The job uploads `release-assets` (the six
+  assets and `SHA256SUMS`, kept 14 days) and outputs the SHA-256 of `SHA256SUMS`.
+- `smoke-x64` (windows-2025) and `smoke-arm64` (windows-11-arm): `SHA256SUMS` checked against `assemble`'s output,
+  then `sha256sum -c`. The CLI and portable zips of the runner's architecture are unzipped with Windows' own
+  `tar.exe`. From the CLI zip: each PE's machine is the runner's (`e7-pe-sections.py --machine` on x64, `od` on ARM64,
+  which has no Python), `lpk.exe --version` names the version, a small folder round-trips through `a` and `x` (each
+  file compared with `cmp`), `lpk-check.exe verify` passes the archive, and `lpk export` writes a `.zip` that `lpk x`
+  extracts through the sandboxed worker, compared again. From the portable zip, the GUI opens the `.lpk` and the
+  `.zip` under `LPK_GUI_SMOKE_REPORT`, each report with no problems and rows rendered (as `ci.yml`'s `portable` job),
+  then `lpk-worker.exe --remove-profile` removes the worker's profile.
+
+**The assets.** For version `<v>`: `LitePack_<v>_x64-setup.exe` and `LitePack_<v>_arm64-setup.exe` (the bundler's
+names, from `tauri.conf.json`'s `productName`), `litepack-<v>-windows-x64-portable.zip`,
+`litepack-<v>-windows-x64-cli.zip`, `litepack-<v>-windows-arm64-portable.zip` and
+`litepack-<v>-windows-arm64-cli.zip` (`make-zips.py`'s), and `SHA256SUMS` (`sha256sum`'s text format, `<hex>  <name>`,
+LF line ends, sorted by name). `python -I scripts/e7-assets.py expected --version <v>` prints the six names; its
+self-test checks them against `make-zips.py` and `productName`. A user checks a download with
+`sha256sum -c SHA256SUMS --ignore-missing`.
 
 **The ARM64 installer.** The hooks cannot see the template's `${ARCH}`, so the ARM64 overlay names
 `crates/lpk-gui/installer-arm64.nsh` as its hooks file. That file defines `LPK_INSTALLER_ARCH` as `arm64` and includes
@@ -348,9 +378,12 @@ any PC that is not ARM64. The x64 installer refuses on ARM64, as before, and on 
 **Unsigned, and deferred to part 2.** Every PE and both installers are unsigned. Part 2 adds signing (with
 `signtool verify`), its deployment target, attestation, the draft release and the tag trigger, the updater's
 `latest.json` signature, and the proof that the bundler downloads nothing (here it may fetch NSIS itself). The later
-steps of part 1 add the zips, `SHA256SUMS`, the notices finder, the SBOMs, and the install checks with the residue
-diff on both architectures.
+steps of part 1 add the rest: part 1d the SBOMs (E8-6's half: one CycloneDX SBOM per binary, planned as one more
+asset, `litepack-<v>-sbom.zip`), and part 1e the install checks on both architectures (a silent install of each
+architecture's installer, its layout and notices, the GUI and `bin\lpk.exe` on a `.lpk` and a `.zip`, a silent
+uninstall and the residue diff). Part 2 then signs the PEs and both installers, and `assemble` checks the
+artefacts against the signed files instead (`docs/notes/e7-design.md` section 1).
 
 **A rehearsal.** Once the workflow is on `main`: `gh workflow run release.yml --ref main`, then
 `gh run list --workflow release.yml` and `gh run view <id>`. The artifacts (`unsigned-x64`, `unsigned-arm64`,
-`installers`) are kept for 7 days. They are unsigned test builds, not releases.
+`installers`) are kept for 7 days, `release-assets` for 14. They are unsigned test builds, not releases.
