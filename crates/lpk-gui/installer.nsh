@@ -458,9 +458,12 @@ FunctionEnd
     Delete "$APPDATA\Microsoft\Windows\Recent\CustomDestinations\a233dcd0c3d36a7d.customDestinations-ms"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Search\JumplistData" "${BUNDLEID}"
     ; R365: an update's download, which the updater plugin leaves in the temp folder (it exits before its own clean-up)
-    ; and the GUI's next start removes; any left over goes here: in each folder named like the plugin's, its one
-    ; installer file, then the folder, non-recursively (a folder holding anything else stays; a file of that name is
-    ; neither a folder to delete in nor one to remove, so it stays too).
+    ; and the GUI's next start removes; any left over goes here. Looser than the GUI's check (R366): in every folder
+    ; whose name has the plugin's shape, the files named like its installer go, then the folder, only if that left it
+    ; empty (anything else in it stays, and the folder with it); a file of that name is neither a folder to delete in
+    ; nor one to remove, so it stays. No test for reparse points: through a junction, Delete reaches only files named
+    ; like LitePack's installer, and RMDir without its recursive switch removes the link, never its target; the temp
+    ; folder is the user's own, so only that user could plant one.
     Push $0
     Push $1
     FindFirst $0 $1 "$TEMP\${PRODUCTNAME}-*-updater-*"
