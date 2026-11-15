@@ -333,8 +333,10 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   `scripts/e7-nsis-overlay.py`, and runs `cargo tauri bundle --ci -v --bundles nsis --target <triple>
   --no-binary-patching --no-sign --config <overlay>`. It fails without makensis's "Processing script file" or with a
   warning 6000. Then 7-Zip lists and unpacks each installer, and every shipped PE inside must equal the build job's
-  (`lpk-gui.exe` exactly once): this is the `--no-binary-patching` check. It uploads `installers` with
-  `installers.sha256`.
+  (`lpk-gui.exe` exactly once): this is the `--no-binary-patching` check. `e7-artefacts.py nsis-parts` then lists
+  every PE of the NSIS installation the bundler used (`%LOCALAPPDATA%\tauri\NSIS`, found by content, paths relative
+  to it) in `nsis-parts.sha256`. It uploads `installers`: the two setups and `nsis-parts.sha256` with
+  `installers.sha256` over all three.
 - `refuse-arm64-on-x64` (windows-2025): the ARM64 installer run with `/S` exits non-zero within 300 s and writes
   nothing under `%LOCALAPPDATA%\LitePack`.
 - `install-arm64` (windows-11-arm): the ARM64 installer run with `/S` installs. Each installed PE is machine 0xAA64
@@ -344,16 +346,21 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   and the lists against the build and `package` jobs' outputs. It runs the self-tests of `make-zips.py`,
   `scripts/e7-assets.py` and `scripts/e7-artefacts.py`, then `make-zips.py` per architecture (`--bin` the build job's
   artifact, the version and the commit time from `preflight`) and copies the two installers beside the zips.
-  `e7-assets.py sums` writes `SHA256SUMS` over exactly the six expected assets and `check` reads it back. Then
-  `e7-artefacts.py notices`, E7-8 part 2's finder: every artefact holds `THIRD-PARTY-NOTICES`, `LICENSE-APACHE` and
-  `LICENSE-MIT` exactly once each, byte-equal to the repository's (the zips read with `zipfile`, the installers
-  through the runner's 7-Zip). And `e7-artefacts.py pes`: every PE inside each artefact is classified. A `shipped`
-  PE is one of the six names, at the artefact's machine (0x8664 or 0xAA64), carries `.dep-v0` and is byte-equal to
-  the build's, each name the artefact should hold exactly once. An `nsis-plugin` is an x86 (0x14C) PE under
-  `$PLUGINSDIR` in an installer. The `nsis-uninstaller` is the `uninstall.exe` NSIS writes at install time (its x86
-  stub, at the installer's root, at most one). Anything else fails. It prints each PE with its class, machine and
-  SHA-256, a count per class, and 7-Zip's full listing of each installer. The job uploads `release-assets` (the six
-  assets and `SHA256SUMS`, kept 14 days) and outputs the SHA-256 of `SHA256SUMS`.
+  `e7-assets.py sums` writes `SHA256SUMS` over exactly the six expected assets and `check` reads it back. Both
+  `e7-artefacts.py` commands take `--version` and refuse a folder holding anything but those six and `SHA256SUMS`.
+  `e7-artefacts.py notices` is E7-8 part 2's finder: every artefact holds `THIRD-PARTY-NOTICES`, `LICENSE-APACHE`
+  and `LICENSE-MIT` exactly once each, at its top folder (`LitePack/` in a zip, the root in an installer), byte-equal
+  to the repository's. Names are compared without regard to case or separator, so a second copy anywhere fails (the
+  zips read with `zipfile`, the installers through the runner's 7-Zip). And `e7-artefacts.py pes`: every PE inside
+  each artefact is classified. A `shipped` PE is one of the six names, at the artefact's machine (0x8664 or 0xAA64),
+  carries `.dep-v0` and is byte-equal to the build's, each name the artefact should hold exactly once. An
+  `nsis-plugin` is an x86 (0x14C) PE directly under `$PLUGINSDIR` in an installer, each name at most once, byte-equal
+  to a file of that name in `nsis-parts.sha256`. The `nsis-uninstaller` is the `uninstall.exe` NSIS writes at install
+  time (x86, at the installer's root, at most one), which must begin with this installer's own stub (its bytes up to
+  its first header, the first 512-byte boundary with NSIS's `EF BE AD DE` `NullsoftInst`) and carry its own
+  first-header magic right after it. Anything else fails. It prints each PE with its class, machine and SHA-256, both
+  uninstaller results, a count per class, and 7-Zip's full listing of each installer. The job uploads
+  `release-assets` (the six assets and `SHA256SUMS`, kept 14 days) and outputs the SHA-256 of `SHA256SUMS`.
 - `smoke-x64` (windows-2025) and `smoke-arm64` (windows-11-arm): `SHA256SUMS` checked against `assemble`'s output,
   then `sha256sum -c`. The CLI and portable zips of the runner's architecture are unzipped with Windows' own
   `tar.exe`. From the CLI zip: each PE's machine is the runner's (`e7-pe-sections.py --machine` on x64, `od` on ARM64,

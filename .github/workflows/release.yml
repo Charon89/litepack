@@ -341,16 +341,27 @@ jobs:
             done < "$T/unsigned-$arch/unsigned.sha256"
             echo "$arch: $checked PEs in the installer equal the build's"
           done
+      # The NSIS installation the bundler used (tauri-bundler 2.10.4: %LOCALAPPDATA%\tauri\NSIS, as no
+      # useLocalToolsDir is set): every PE in it, found by content, with its path relative to that folder, so that
+      # assemble can require each of the installers' $PLUGINSDIR parts to be byte-equal to one of them.
+      - name: nsis-parts.sha256 (every PE of the NSIS installation the bundler used)
+        run: |
+          set -euo pipefail
+          nsis="$(cygpath -m "$LOCALAPPDATA")/tauri/NSIS"
+          test -d "$nsis" || { echo "no NSIS installation at $nsis"; exit 1; }
+          ls -laR "$nsis"
+          python -I scripts/e7-artefacts.py nsis-parts "$nsis" > "$T/installers/nsis-parts.sha256"
+          cat "$T/installers/nsis-parts.sha256"
       - name: installers.sha256
         id: list
         run: |
           cd "$T/installers"
-          sha256sum *-setup.exe > installers.sha256
+          sha256sum *-setup.exe nsis-parts.sha256 > installers.sha256
           cat installers.sha256
-          test "$(wc -l < installers.sha256)" = 2
+          test "$(wc -l < installers.sha256)" = 3
           echo "sha256=$(sha256sum installers.sha256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-      # The artifact holds the two setups with installers.sha256, and also each architecture's overlay
-      # (overlay-<arch>.json) and bundle log (bundle-<arch>.log): the evidence of how each setup was built.
+      # The artifact holds the two setups and nsis-parts.sha256 with installers.sha256, and also each architecture's
+      # overlay (overlay-<arch>.json) and bundle log (bundle-<arch>.log): the evidence of how each setup was built.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installers
@@ -541,7 +552,8 @@ jobs:
           check "$T/installers" installers.sha256 "$INSTALLERS_LIST"
           test "$(wc -l < "$T/unsigned-x64/unsigned.sha256")" = 6
           test "$(wc -l < "$T/unsigned-arm64/unsigned.sha256")" = 6
-          test "$(wc -l < "$T/installers/installers.sha256")" = 2
+          test "$(wc -l < "$T/installers/installers.sha256")" = 3
+          grep -q ' \*\?nsis-parts.sha256$' "$T/installers/installers.sha256"
       - name: The asset, notices, PE and zip scripts' own tests
         run: |
           python -I scripts/make-zips.py --self-test
@@ -555,7 +567,10 @@ jobs:
             python -I scripts/make-zips.py --bin "$T/unsigned-$arch" --arch "$arch" --version "$VERSION" \
               --timestamp "$TIMESTAMP" --out "$T/assets"
           done
-          while read -r hash file; do cp "$T/installers/${file#\*}" "$T/assets/"; done < "$T/installers/installers.sha256"
+          while read -r hash file; do
+            file="${file#\*}"
+            case "$file" in *-setup.exe) cp "$T/installers/$file" "$T/assets/" ;; esac
+          done < "$T/installers/installers.sha256"
           for z in "$T/assets/"*.zip; do python -I -m zipfile -l "$z"; done
           ls -la "$T/assets"
       - name: SHA256SUMS over exactly the expected assets
@@ -568,12 +583,14 @@ jobs:
           (cd "$T/assets" && sha256sum -c SHA256SUMS)
           echo "sha256=$(sha256sum "$T/assets/SHA256SUMS" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - name: The notices and licences, once each in every artefact (E7-8 part 2)
-        run: python -I scripts/e7-artefacts.py notices "$T/assets" --repo "$(cygpath -m "$PWD")" --sevenzip "$SZ"
+        run: |
+          python -I scripts/e7-artefacts.py notices "$T/assets" --version "$VERSION" --repo "$(cygpath -m "$PWD")" \
+            --sevenzip "$SZ"
       # Also prints 7-Zip's full listing of each installer, so the classes can be read against it.
       - name: Every PE inside the artefacts, classified
         run: |
-          python -I scripts/e7-artefacts.py pes "$T/assets" --unsigned-x64 "$T/unsigned-x64" \
-            --unsigned-arm64 "$T/unsigned-arm64" --sevenzip "$SZ"
+          python -I scripts/e7-artefacts.py pes "$T/assets" --version "$VERSION" --unsigned-x64 "$T/unsigned-x64" \
+            --unsigned-arm64 "$T/unsigned-arm64" --nsis-parts "$T/installers/nsis-parts.sha256" --sevenzip "$SZ"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets

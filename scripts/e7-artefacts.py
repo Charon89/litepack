@@ -1,12 +1,19 @@
-"""E7-2 part 1c (release.yml's assemble job): what is inside the six release artefacts, the two NSIS installers and
-the portable and CLI zip of each architecture (names as scripts/e7-assets.py gives them).
+"""E7-2 part 1c (release.yml's package and assemble jobs): what is inside the six release artefacts, the two NSIS
+installers and the portable and CLI zip of each architecture (names from scripts/e7-assets.py's `expected`).
 
-    python -I scripts/e7-artefacts.py notices <dir> --repo <root> [--sevenzip <7z.exe>]
-    python -I scripts/e7-artefacts.py pes <dir> --unsigned-x64 <dir> --unsigned-arm64 <dir> [--sevenzip <7z.exe>]
+    python -I scripts/e7-artefacts.py notices <dir> --version <v> --repo <root> [--sevenzip <7z.exe>]
+    python -I scripts/e7-artefacts.py pes <dir> --version <v> --unsigned-x64 <dir> --unsigned-arm64 <dir> \\
+        --nsis-parts <file> [--sevenzip <7z.exe>]
+    python -I scripts/e7-artefacts.py nsis-parts <NSIS folder>
     python -I scripts/e7-artefacts.py --self-test [--sevenzip <7z.exe>]
 
+`notices` and `pes` first require `<dir>` to hold exactly e7-assets.py's expected names for `<v>` and SHA256SUMS,
+nothing else.
+
 `notices` (E7-8 part 2, the notices finder): each artefact holds THIRD-PARTY-NOTICES, LICENSE-APACHE and LICENSE-MIT
-exactly once each (by file name, in any folder), byte-equal to the repository's. One line per artefact and file.
+exactly once each, at its top folder (`LitePack/` in a zip, the root as 7-Zip lists it in an installer), byte-equal to
+the repository's. Names are compared without regard to case or separator, so a second copy elsewhere, or under
+another case, fails as a duplicate. One line per artefact and file.
 
 `pes`: every PE inside each artefact (a file starting `MZ` whose `e_lfanew` points at a `PE\\0\\0` signature) is
 classified, and anything that fits no class fails:
@@ -15,16 +22,25 @@ classified, and anything that fits no class fails:
   `.dep-v0` section, and byte-equal to that architecture's build (`unsigned.sha256` of the build job's artifact).
   Each artefact holds each shipped name it should exactly once (an installer all six, a portable zip all but
   lpk_shell.dll, a CLI zip the four command-line tools; scripts/make-zips.py).
-- `nsis-plugin`: NSIS's own x86 parts (machine 0x14C) under `$PLUGINSDIR` in an installer.
-- `nsis-uninstaller`: the uninstaller that NSIS writes at install time (WriteUninstaller), which 7-Zip shows as a file
-  `uninstall.exe` at the installer's root: NSIS's own x86 stub (machine 0x14C), at most one per installer.
+- `nsis-plugin`: NSIS's own x86 parts (machine 0x14C) directly under `$PLUGINSDIR` in an installer, each name at most
+  once, each byte-equal to a file of the same name (case aside) in `--nsis-parts`: the package job's list of every PE
+  of the NSIS installation the bundler used (this script's `nsis-parts` command). Anything else under `$PLUGINSDIR`
+  fits no class.
+- `nsis-uninstaller`: the uninstaller NSIS writes at install time (WriteUninstaller), which 7-Zip shows as a file
+  `uninstall.exe` at the installer's root and rebuilds from the installer's own stub: machine 0x14C, at most one per
+  installer, beginning with this installer's stub (its bytes [0, S), S the offset of the installer's first header,
+  the first 512-byte boundary holding the flags and then `EF BE AD DE` `NullsoftInst`), and carrying its own
+  first-header magic right after it. Both results are printed.
 It prints each PE with its class, machine and SHA-256, a count per class, and 7-Zip's full listing of each installer
 once.
 
-The zips are read with zipfile; the installers through 7-Zip (`7z l -slt` for the member list, `7z x -aou` to unpack,
-so that a duplicated member survives under a new name and fails as an unknown one). `--sevenzip` names 7z.exe;
-without it, 7z on PATH or `%ProgramFiles%\\7-Zip\\7z.exe`. The PE reading is scripts/e7-pe-sections.py's. Each
-command exits 1 naming every failure. The standard library only.
+`nsis-parts`: the `sha256sum` lines (`<hex>  <path>`) of every PE file under a folder, found by content, with its
+path relative to the folder ('/'-separated), sorted by path; every line is kept, the same base name twice included.
+
+The zips are read with zipfile (member names normalised, `\\` to `/`); the installers through 7-Zip (`7z l -slt` for
+the member list, `7z x -aou` to unpack, so that a duplicated member survives under a new name and fails as an unknown
+one). `--sevenzip` names 7z.exe; without it, 7z on PATH or `%ProgramFiles%\\7-Zip\\7z.exe`. The PE reading is
+scripts/e7-pe-sections.py's. Each command exits 1 naming every failure. The standard library only.
 """
 
 import argparse
@@ -52,6 +68,8 @@ def _load(name, file):
 
 
 pesec = _load("e7_pe_sections", "e7-pe-sections.py")
+assets = _load("e7_assets", "e7-assets.py")
+mz = _load("make_zips", "make-zips.py")
 
 NOTICE_FILES = ("THIRD-PARTY-NOTICES", "LICENSE-APACHE", "LICENSE-MIT")
 SHIPPED = ("lpk.exe", "lpk-check.exe", "lpk-worker.exe", "lpk-worker-libarchive.exe", "lpk_shell.dll", "lpk-gui.exe")
@@ -65,11 +83,14 @@ HOLDS = {
 MACHINE = {"x64": 0x8664, "arm64": 0xAA64}
 X86 = 0x14C
 DEP = ".dep-v0"
+PLUGINSDIR = "$PLUGINSDIR/"
 # As 7-Zip may show it (with or without the $INSTDIR prefix), compared in lower case.
 UNINSTALLER = ("uninstall.exe", "$instdir/uninstall.exe")
+# NSIS's first header: int flags, then int siginfo 0xDEADBEEF (little-endian) and "NullsoftInst".
+NSIS_MAGIC = b"\xef\xbe\xad\xdeNullsoftInst"
 
-INSTALLER_RE = re.compile(r"^.+_(?P<v>[^_]+)_(?P<arch>x64|arm64)-setup\.exe$")
-ZIP_RE = re.compile(r"^litepack-(?P<v>.+)-windows-(?P<arch>x64|arm64)-(?P<kind>portable|cli)\.zip$")
+INSTALLER_RE = re.compile(r"^.+_(?P<arch>x64|arm64)-setup\.exe$")
+ZIP_RE = re.compile(r"^.+-windows-(?P<arch>x64|arm64)-(?P<kind>portable|cli)\.zip$")
 SUM_RE = re.compile(r"^([0-9a-f]{64}) [ *](.+)$")
 
 
@@ -79,6 +100,11 @@ class Fail(Exception):
 
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def base(rel):
+    """A member's base name, as compared: lower case."""
+    return PurePosixPath(rel).name.lower()
 
 
 class Artefact:
@@ -92,32 +118,29 @@ class Artefact:
         self.listing = ""
 
 
-def find_artefacts(folder):
-    """The six artefacts in `folder` as (path, arch, kind); other files are ignored. Fails unless each of the six
-    slots is there exactly once, all of one version."""
-    found, versions = {}, set()
-    for p in sorted(Path(folder).iterdir()):
-        m = INSTALLER_RE.match(p.name)
-        if m:
-            slot = (m["arch"], "installer")
-        else:
-            m = ZIP_RE.match(p.name)
-            if not m:
-                continue
-            slot = (m["arch"], m["kind"])
-        versions.add(m["v"])
-        found.setdefault(slot, []).append(p)
-    errors = []
-    for arch in MACHINE:
-        for kind in HOLDS:
-            got = found.get((arch, kind), [])
-            if len(got) != 1:
-                errors.append(f"{len(got)} {arch} {kind} artefacts in {folder} ({', '.join(p.name for p in got)})")
-    if len(versions) > 1:
-        errors.append(f"artefacts of more than one version: {sorted(versions)}")
+def find_artefacts(folder, version):
+    """The six artefacts in `folder` as (path, arch, kind). Fails unless `folder` holds exactly e7-assets.py's expected
+    names for `version` and, optionally, SHA256SUMS."""
+    try:
+        names = assets.expected(version)
+    except assets.AssetError as e:
+        raise Fail(str(e))
+    present = sorted(p.name for p in Path(folder).iterdir())
+    errors = [f"missing: {n}" for n in names if n not in present]
+    errors += [f"not an expected asset: {n}" for n in present if n not in names and n != assets.SUMS]
     if errors:
-        raise Fail("; ".join(errors))
-    return [(found[(a, k)][0], a, k) for a in MACHINE for k in HOLDS]
+        raise Fail(f"{folder}: " + "; ".join(errors))
+    out = []
+    for n in names:
+        m = INSTALLER_RE.match(n)
+        if m:
+            out.append((Path(folder) / n, m["arch"], "installer"))
+        else:
+            m = ZIP_RE.match(n)
+            out.append((Path(folder) / n, m["arch"], m["kind"]))
+    if sorted((a, k) for _, a, k in out) != sorted((a, k) for a in MACHINE for k in HOLDS):
+        raise Fail(f"the expected names do not give one artefact of each kind and architecture: {names}")
+    return out
 
 
 def find_sevenzip(given):
@@ -168,7 +191,8 @@ def run_7z(sz, args):
 
 def unpack(path, arch, kind, dest, sevenzip=None, through_7z=None):
     """Read the artefact's members into `dest`. A zip goes through zipfile (each member to its own numbered folder, so
-    that duplicates stay apart); an installer (or, in the self-test, any archive with through_7z) through 7-Zip."""
+    that duplicates stay apart; names with `\\` turned to `/`); an installer (or, in the self-test, any archive with
+    through_7z) through 7-Zip."""
     a = Artefact(path, arch, kind)
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -184,12 +208,18 @@ def unpack(path, arch, kind, dest, sevenzip=None, through_7z=None):
     else:
         with zipfile.ZipFile(path) as z:
             for n, info in enumerate(i for i in z.infolist() if not i.is_dir()):
-                a.listed.append(info.filename)
-                f = dest / f"{n:05d}" / (PurePosixPath(info.filename).name or "unnamed")
+                rel = info.filename.replace("\\", "/")
+                a.listed.append(rel)
+                f = dest / f"{n:05d}" / (PurePosixPath(rel).name or "unnamed")
                 f.parent.mkdir()
                 f.write_bytes(z.read(info))
-                a.files.append((info.filename, f))
+                a.files.append((rel, f))
     return a
+
+
+def top_of(a, name):
+    """Where a notice must sit in artefact `a`: the zip's top folder, or the installer's root."""
+    return name if a.kind == "installer" else f"{mz.PRODUCT}/{name}"
 
 
 def notices(artefacts, repo):
@@ -197,34 +227,52 @@ def notices(artefacts, repo):
     lines, errors = [], []
     want = {n: (Path(repo) / n).read_bytes() for n in NOTICE_FILES}
     for a in artefacts:
-        counts = Counter(PurePosixPath(p).name for p in a.listed)
+        counts = Counter(base(p) for p in a.listed)
         for n in NOTICE_FILES:
-            hits = [f for rel, f in a.files if PurePosixPath(rel).name == n]
-            if counts[n] == 0:
+            hits = [(rel, f) for rel, f in a.files if base(rel) == n.lower()]
+            count = max(counts[n.lower()], len(hits))
+            if count == 0:
                 errors.append(f"{a.name}: no {n}")
-            elif counts[n] > 1 or len(hits) > 1:
-                errors.append(f"{a.name}: {n} {max(counts[n], len(hits))} times")
-            elif len(hits) != 1:
-                errors.append(f"{a.name}: {n} listed but not unpacked")
-            elif hits[0].read_bytes() != want[n]:
+            elif count > 1:
+                errors.append(f"{a.name}: {n} {count} times ({', '.join(rel for rel, _ in hits)})")
+            elif hits[0][0] != top_of(a, n):
+                errors.append(f"{a.name}: {n} is at {hits[0][0]}, not at the top ({top_of(a, n)})")
+            elif hits[0][1].read_bytes() != want[n]:
                 errors.append(f"{a.name}: {n} differs from the repository's")
             else:
-                where = [p for p in a.listed if PurePosixPath(p).name == n][0]
-                lines.append(f"{a.name}: {where}: once, byte-equal to the repository's {n}")
+                lines.append(f"{a.name}: {hits[0][0]}: once, at the top, byte-equal to the repository's {n}")
     return lines, errors
+
+
+def read_sums(path):
+    """[(sha256, '/'-separated path)] of a sha256sum file."""
+    out = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        m = SUM_RE.match(line.rstrip("\r"))
+        if not m:
+            raise Fail(f"{path}: not a sha256sum line: {line!r}")
+        out.append((m[1], m[2].replace("\\", "/")))
+    return out
 
 
 def read_unsigned(folder):
     """{name: sha256} of a build job's unsigned.sha256 (the six shipped names exactly)."""
     path = Path(folder) / "unsigned.sha256"
-    out = {}
-    for line in path.read_text(encoding="ascii").splitlines():
-        m = SUM_RE.match(line.strip())
-        if not m:
-            raise Fail(f"{path}: not a sha256sum line: {line!r}")
-        out[PurePosixPath(m[2].replace("\\", "/")).name] = m[1]
+    out = {PurePosixPath(p).name: h for h, p in read_sums(path)}
     if sorted(out) != sorted(SHIPPED):
         raise Fail(f"{path} lists {sorted(out)}, expected {sorted(SHIPPED)}")
+    return out
+
+
+def read_nsis_parts(path):
+    """{lower-case base name: {sha256}} of the package job's nsis-parts.sha256."""
+    out = {}
+    for h, p in read_sums(path):
+        out.setdefault(base(p), set()).add(h)
+    if not out:
+        raise Fail(f"{path} lists no file")
     return out
 
 
@@ -238,36 +286,99 @@ def is_pe(path):
         return f.read(4) == b"PE\0\0"
 
 
-def classify(rel, path, arch, kind, unsigned):
-    """(class, machine, sha256, problems) of the PE at `path`, listed as `rel` in an artefact of `arch` and `kind`."""
+def nsis_parts_lines(folder):
+    """The sha256sum lines of every PE under `folder`, by content, sorted by relative path."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise Fail(f"no folder {folder}")
+    lines = []
+    for p in sorted(folder.rglob("*"), key=lambda q: q.relative_to(folder).as_posix()):
+        if p.is_file() and is_pe(p):
+            lines.append(f"{sha256_bytes(p.read_bytes())}  {p.relative_to(folder).as_posix()}")
+    if not lines:
+        raise Fail(f"no PE under {folder}")
+    return lines
+
+
+def nsis_first_header(data):
+    """S, the offset of the first 512-byte boundary holding NSIS's first header (flags, then the magic); None if
+    there is none."""
+    i = data.find(NSIS_MAGIC)
+    while i != -1:
+        if (i - 4) % 512 == 0 and i >= 4:
+            return i - 4
+        i = data.find(NSIS_MAGIC, i + 1)
+    return None
+
+
+def uninstaller_check(data, stub):
+    """(notes, problems) of the uninstaller's bytes against the installer's stub [0, S)."""
+    s = len(stub)
+    same = data[:s] == stub
+    magic = data[s + 4 : s + 4 + len(NSIS_MAGIC)] == NSIS_MAGIC
+    notes = [f"begins with this installer's stub [0, {s:#x}): {'yes' if same else 'no'}",
+             f"its own first-header magic at {s:#x}: {'yes' if magic else 'no'}"]
+    problems = []
+    if not same:
+        problems.append(f"does not begin with this installer's stub [0, {s:#x})")
+    if not magic:
+        problems.append(f"no first-header magic right after the stub (at {s:#x})")
+    return notes, problems
+
+
+def classify(rel, path, arch, kind, unsigned, nsis_parts=None, stub=None):
+    """(class, machine, sha256, problems, notes) of the PE at `path`, listed as `rel` in an artefact of `arch` and
+    `kind`; `nsis_parts` from read_nsis_parts and `stub` the installer's bytes [0, S) for an installer."""
     data = Path(path).read_bytes()
     h = sha256_bytes(data)
     m = pesec.machine(path)
-    base = PurePosixPath(rel).name
-    problems = []
-    if base in SHIPPED and base in HOLDS[kind]:
+    name = PurePosixPath(rel).name
+    problems, notes = [], []
+    if name in SHIPPED and name in HOLDS[kind]:
         cls = "shipped"
         if m != MACHINE[arch]:
             problems.append(f"machine {m:#06x}, not {MACHINE[arch]:#06x}")
         if DEP not in pesec.sections(path):
             problems.append(f"no {DEP} section")
-        if h != unsigned[arch].get(base):
-            problems.append(f"not the {arch} build's {base} ({unsigned[arch].get(base)})")
-    elif kind == "installer" and rel.startswith("$PLUGINSDIR/"):
-        cls = "nsis-plugin"
-        if m != X86:
-            problems.append(f"machine {m:#06x}, not {X86:#06x}")
+        if h != unsigned[arch].get(name):
+            problems.append(f"not the {arch} build's {name} ({unsigned[arch].get(name)})")
+    elif kind == "installer" and rel.startswith(PLUGINSDIR):
+        inner = rel[len(PLUGINSDIR):]
+        if "/" in inner:
+            cls = "unclassified"
+            problems.append("fits no class (in a subfolder of $PLUGINSDIR)")
+        elif not nsis_parts or base(inner) not in nsis_parts:
+            cls = "unclassified"
+            problems.append("fits no class (not a file of the NSIS installation)")
+        else:
+            cls = "nsis-plugin"
+            if m != X86:
+                problems.append(f"machine {m:#06x}, not {X86:#06x}")
+            if h not in nsis_parts[base(inner)]:
+                problems.append(f"not byte-equal to any {inner} of the NSIS installation")
     elif kind == "installer" and rel.lower() in UNINSTALLER:
         cls = "nsis-uninstaller"
         if m != X86:
             problems.append(f"machine {m:#06x}, not {X86:#06x}")
+        if stub is None:
+            problems.append("the installer has no NSIS first header to compare with")
+        else:
+            notes, more = uninstaller_check(data, stub)
+            problems += more
     else:
         cls = "unclassified"
         problems.append("fits no class")
-    return cls, m, h, problems
+    return cls, m, h, problems, notes
 
 
-def pes(artefacts, unsigned):
+def installer_stub(path):
+    """The installer's bytes [0, S); None without a first header."""
+    data = Path(path).read_bytes()
+    s = nsis_first_header(data)
+    return None if s is None else data[:s]
+
+
+def pes(artefacts, unsigned, nsis_parts=None):
     """(lines, errors) of the PE classification over unpacked artefacts."""
     lines, errors, total = [], [], Counter()
     for a in artefacts:
@@ -275,24 +386,31 @@ def pes(artefacts, unsigned):
             lines.append(f"--- 7-Zip's listing of {a.name} ---")
             lines += a.listing.rstrip().splitlines()
             lines.append(f"--- end of {a.name} ---")
-        per = Counter()
-        seen = Counter()
+        stub = None
+        if a.kind == "installer":
+            stub = installer_stub(a.path) if a.path.is_file() else None
+            lines.append(f"{a.name}: first header at " + (f"{len(stub):#x}" if stub is not None else "none"))
+        per, seen, plugins = Counter(), Counter(), Counter()
         for rel, f in a.files:
             if not is_pe(f):
                 continue
             try:
-                cls, m, h, problems = classify(rel, f, a.arch, a.kind, unsigned)
+                cls, m, h, problems, notes = classify(rel, f, a.arch, a.kind, unsigned, nsis_parts, stub)
             except SystemExit as e:
                 errors.append(f"{a.name}: {rel}: an unreadable PE: {e}")
                 continue
             per[cls] += 1
             if cls == "shipped":
                 seen[PurePosixPath(rel).name] += 1
+            if cls == "nsis-plugin":
+                plugins[base(rel)] += 1
             lines.append(f"{a.name}: {rel}: {cls}, machine {m:#06x}, sha256 {h}")
+            lines += [f"{a.name}: {rel}: {n}" for n in notes]
             errors += [f"{a.name}: {rel}: {p}" for p in problems]
         for n in sorted(HOLDS[a.kind]):
             if seen[n] != 1:
                 errors.append(f"{a.name}: {n} {seen[n]} times, expected once")
+        errors += [f"{a.name}: $PLUGINSDIR's {n} {c} times" for n, c in sorted(plugins.items()) if c > 1]
         if per["nsis-uninstaller"] > 1:
             errors.append(f"{a.name}: {per['nsis-uninstaller']} uninstallers")
         lines.append(f"{a.name}: " + ", ".join(f"{c} {per[c]}" for c in sorted(per)) if per else f"{a.name}: no PE")
@@ -313,8 +431,9 @@ def report(lines, errors, what):
     return 0
 
 
-def unpack_all(folder, work, sevenzip):
-    return [unpack(p, arch, kind, Path(work) / f"{arch}-{kind}", sevenzip) for p, arch, kind in find_artefacts(folder)]
+def unpack_all(folder, version, work, sevenzip):
+    return [unpack(p, arch, kind, Path(work) / f"{arch}-{kind}", sevenzip)
+            for p, arch, kind in find_artefacts(folder, version)]
 
 
 def main(argv):
@@ -324,33 +443,40 @@ def main(argv):
     sub = ap.add_subparsers(dest="cmd")
     n = sub.add_parser("notices")
     n.add_argument("dir")
+    n.add_argument("--version", required=True)
     n.add_argument("--repo", required=True)
     n.add_argument("--sevenzip", dest="sevenzip_sub")
     p = sub.add_parser("pes")
     p.add_argument("dir")
+    p.add_argument("--version", required=True)
     p.add_argument("--unsigned-x64", required=True)
     p.add_argument("--unsigned-arm64", required=True)
+    p.add_argument("--nsis-parts", required=True)
     p.add_argument("--sevenzip", dest="sevenzip_sub")
+    q = sub.add_parser("nsis-parts")
+    q.add_argument("dir")
     a = ap.parse_args(argv)
     sz = getattr(a, "sevenzip_sub", None) or a.sevenzip
     if a.self_test:
         return self_test(sz)
     if a.cmd is None:
-        ap.error("a command (notices or pes) or --self-test")
+        ap.error("a command (notices, pes or nsis-parts) or --self-test")
     try:
+        if a.cmd == "nsis-parts":
+            print("\n".join(nsis_parts_lines(a.dir)))
+            return 0
         with tempfile.TemporaryDirectory() as work:
-            arts = unpack_all(a.dir, work, sz)
             if a.cmd == "notices":
-                return report(*notices(arts, a.repo), "notices")
+                return report(*notices(unpack_all(a.dir, a.version, work, sz), a.repo), "notices")
             unsigned = {"x64": read_unsigned(a.unsigned_x64), "arm64": read_unsigned(a.unsigned_arm64)}
-            return report(*pes(arts, unsigned), "pes")
+            parts = read_nsis_parts(a.nsis_parts)
+            return report(*pes(unpack_all(a.dir, a.version, work, sz), unsigned, parts), "pes")
     except (Fail, OSError) as e:
         print(f"e7-artefacts: {e}", file=sys.stderr)
         return 1
 
 
 def self_test(sevenzip=None):
-    mz = _load("make_zips", "make-zips.py")
     failures = []
 
     def ok(name, cond):
@@ -391,7 +517,10 @@ def self_test(sevenzip=None):
             with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z, warnings.catch_warnings():
                 warnings.simplefilter("ignore")  # the planted duplicates
                 for name, data in change(members):
-                    z.writestr(name, data)
+                    info = zipfile.ZipInfo(name)
+                    info.filename = name  # as given: a planted `\` survives on every OS
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    z.writestr(info, data)
 
         def zip_arts(folder):
             arts = []
@@ -400,6 +529,7 @@ def self_test(sevenzip=None):
                 arts.append(unpack(p, m["arch"], m["kind"], d / "work" / folder.name / p.stem))
             return arts
 
+        parts = {}
         good = zips("good")
         arts = zip_arts(good)
         lines, errors = notices(arts, repo)
@@ -418,7 +548,7 @@ def self_test(sevenzip=None):
         cli = "litepack-0.1.0-windows-x64-cli.zip"
         port = "litepack-0.1.0-windows-arm64-portable.zip"
         n_check = lambda arts: notices(arts, repo)
-        p_check = lambda arts: pes(arts, unsigned)
+        p_check = lambda arts: pes(arts, unsigned, parts)
         planted("notice-missing", cli, lambda ms: [m for m in ms if not m[0].endswith("LICENSE-MIT")], n_check,
                 f"{cli}: no LICENSE-MIT")
         planted("notice-twice", cli, lambda ms: ms + [("LitePack/sub/LICENSE-APACHE", (repo / "LICENSE-APACHE")
@@ -462,26 +592,75 @@ def self_test(sevenzip=None):
         # An MZ file without a PE header is no PE (a README that happens to start with MZ, say).
         folder = zips("not-a-pe")
         rewrite(folder / cli, lambda ms: ms + [("LitePack/MZ.txt", b"MZ" + bytes(200))])
-        ok("an MZ file without a PE header is not a PE", pes(zip_arts(folder), unsigned)[1] == [])
+        ok("an MZ file without a PE header is not a PE", pes(zip_arts(folder), unsigned, parts)[1] == [])
+
+        # LOW-2 and LOW-3: another separator or case is the same name; a sole copy below the top folder fails.
+        planted("notice-backslash-twice", cli, lambda ms: ms + [("LitePack\\LICENSE-MIT", (repo / "LICENSE-MIT")
+                .read_bytes())], n_check, f"{cli}: LICENSE-MIT 2 times")
+        planted("notice-case-twice", cli, lambda ms: ms + [("LitePack/license-mit", (repo / "LICENSE-MIT")
+                .read_bytes())], n_check, f"{cli}: LICENSE-MIT 2 times")
+        planted("notice-in-a-subfolder", port, lambda ms: [("LitePack/doc/LICENSE-MIT", b) if n.endswith("LICENSE-MIT")
+                else (n, b) for n, b in ms], n_check, f"{port}: LICENSE-MIT is at LitePack/doc/LICENSE-MIT, not at")
+        planted("notice-lower-case-alone", port, lambda ms: [("LitePack/license-mit", b) if n.endswith("LICENSE-MIT")
+                else (n, b) for n, b in ms], n_check, f"{port}: LICENSE-MIT is at LitePack/license-mit")
 
         # The installer's classes, on synthetic members (no installer is built here).
         f = d / "member"
-
-        def cls(rel, data, kind="installer", arch="x64"):
-            f.write_bytes(data)
-            return classify(rel, f, arch, kind, unsigned)
-
         plugin = pesec.fake_pe([".text"], arch=X86)
-        ok("installer: $PLUGINSDIR x86 DLL is an nsis-plugin", cls("$PLUGINSDIR/nsDialogs.dll", plugin)[::3] ==
+        dialogs = plugin + b"nsDialogs"
+        # The NSIS installation's list, as `nsis-parts` writes it: the same base name twice (two builds) kept.
+        nsis_dir = d / "NSIS"
+        for rel, data in [("Plugins/x86-unicode/System.dll", plugin), ("Plugins/x86-ansi/System.dll", plugin + b"a"),
+                          ("Plugins/x86-unicode/nsDialogs.dll", dialogs), ("makensis.exe", helper),
+                          ("Docs/readme.txt", b"MZ not a PE" + bytes(100))]:
+            (nsis_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (nsis_dir / rel).write_bytes(data)
+        part_lines = nsis_parts_lines(nsis_dir)
+        ok("nsis-parts: every PE by content, sorted, relative", [l.split("  ")[1] for l in part_lines] == [
+            "Plugins/x86-ansi/System.dll", "Plugins/x86-unicode/System.dll", "Plugins/x86-unicode/nsDialogs.dll",
+            "makensis.exe"])
+        (d / "nsis-parts.sha256").write_text("\n".join(part_lines) + "\n", encoding="utf-8", newline="\n")
+        parts = read_nsis_parts(d / "nsis-parts.sha256")
+        ok("nsis-parts: both System.dll kept", len(parts["system.dll"]) == 2)
+
+        # A synthetic installer: an x86 stub padded to 0x400 (an unaligned magic inside it), then its first header.
+        stub = bytearray(pesec.fake_pe([".text"], arch=X86).ljust(0x400, b"\0"))
+        stub[0x2C0 : 0x2C0 + len(NSIS_MAGIC)] = NSIS_MAGIC
+        stub = bytes(stub)
+        setup_bytes = stub + b"\0\0\0\0" + NSIS_MAGIC + b"installer data"
+        ok("the first header: the first 512-byte boundary with the magic", nsis_first_header(setup_bytes) == 0x400)
+        ok("no first header: None", nsis_first_header(stub[:0x2C0]) is None)
+        uninst = stub + b"\x03\0\0\0" + NSIS_MAGIC + b"uninstaller data"
+
+        def cls(rel, data, kind="installer", arch="x64", s=stub):
+            f.write_bytes(data)
+            return classify(rel, f, arch, kind, unsigned, parts, s)
+
+        ok("installer: a listed $PLUGINSDIR x86 DLL is an nsis-plugin",
+           cls("$PLUGINSDIR/nsDialogs.dll", dialogs)[::3] == ("nsis-plugin", []))
+        ok("installer: either listed System.dll, any case", cls("$PLUGINSDIR/system.DLL", plugin + b"a")[::3] ==
            ("nsis-plugin", []))
-        ok("installer: an x64 DLL under $PLUGINSDIR fails", cls("$PLUGINSDIR/x.dll", helper)[3] ==
-           ["machine 0x8664, not 0x014c"])
-        ok("installer: uninstall.exe at the root is the nsis-uninstaller", cls("uninstall.exe", plugin)[::3] ==
+        ok("installer: a plugin in a subfolder fits no class", cls("$PLUGINSDIR/x/System.dll", plugin)[::3] ==
+           ("unclassified", ["fits no class (in a subfolder of $PLUGINSDIR)"]))
+        ok("installer: a plugin name not listed fits no class", cls("$PLUGINSDIR/StartMenu.dll", plugin)[::3] ==
+           ("unclassified", ["fits no class (not a file of the NSIS installation)"]))
+        ok("installer: a plugin with one changed byte fails", cls("$PLUGINSDIR/nsDialogs.dll", dialogs[:-1] + b"t")[3]
+           == ["not byte-equal to any nsDialogs.dll of the NSIS installation"])
+        ok("installer: without the list, $PLUGINSDIR fits no class",
+           classify("$PLUGINSDIR/System.dll", f, "x64", "installer", unsigned)[0] == "unclassified")
+        ok("installer: this installer's uninstaller is the nsis-uninstaller", cls("uninstall.exe", uninst)[::3] ==
            ("nsis-uninstaller", []))
-        ok("installer: $INSTDIR/Uninstall.exe is the nsis-uninstaller", cls("$INSTDIR/Uninstall.exe", plugin)[0] ==
+        ok("installer: the uninstaller's two results are printed", cls("uninstall.exe", uninst)[4] == [
+            "begins with this installer's stub [0, 0x400): yes", "its own first-header magic at 0x400: yes"])
+        other_stub = stub[:0x100] + bytes([stub[0x100] ^ 1]) + stub[0x101:]
+        ok("installer: an uninstaller of another stub fails", cls("uninstall.exe", other_stub + uninst[0x400:])[3] ==
+           ["does not begin with this installer's stub [0, 0x400)"])
+        ok("installer: an uninstaller without its own header fails", cls("uninstall.exe", stub + bytes(64))[3] ==
+           ["no first-header magic right after the stub (at 0x400)"])
+        ok("installer: $INSTDIR/Uninstall.exe is the nsis-uninstaller", cls("$INSTDIR/Uninstall.exe", uninst)[0] ==
            "nsis-uninstaller")
-        ok("installer: an x64 uninstall.exe fails", cls("uninstall.exe", helper)[3] == ["machine 0x8664, not 0x014c"])
-        ok("installer: uninstall.exe elsewhere fits no class", cls("bin/uninstall.exe", plugin)[0] == "unclassified")
+        ok("installer: an x64 uninstall.exe fails", "machine 0x8664, not 0x014c" in cls("uninstall.exe", helper)[3])
+        ok("installer: uninstall.exe elsewhere fits no class", cls("bin/uninstall.exe", uninst)[0] == "unclassified")
         ok("installer: an x86 PE outside $PLUGINSDIR fits no class", cls("helper.exe", plugin)[0] == "unclassified")
         ok("installer: lpk_shell.dll under shell/<v>/ is shipped",
            cls("shell/0.1.0/lpk_shell.dll", (bins["x64"] / "lpk_shell.dll").read_bytes())[::3] == ("shipped", []))
@@ -489,15 +668,19 @@ def self_test(sevenzip=None):
            cls("LitePack/lpk_shell.dll", (bins["x64"] / "lpk_shell.dll").read_bytes(), "portable")[0] == "unclassified")
 
         # An installer-shaped artefact, its members written by hand: the six shipped PEs, the NSIS parts.
-        def installer(extra):
-            a = Artefact(d / "LitePack_0.1.0_x64-setup.exe", "x64", "installer")
-            root = d / "work" / f"inst-{len(extra)}"
+        setup = d / "LitePack_0.1.0_x64-setup.exe"
+        setup.write_bytes(setup_bytes)
+
+        def installer(extra, tag):
+            a = Artefact(setup, "x64", "installer")
+            root = d / "work" / f"inst-{tag}"
             members = [("lpk-gui.exe", "lpk-gui.exe")] + [(f"bin/{n}", n) for n in CLI_EXES]
             members.append(("shell/0.1.0/lpk_shell.dll", "lpk_shell.dll"))
             for rel, n in members:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_bytes((bins["x64"] / n).read_bytes())
-            for rel, data in [("$PLUGINSDIR/System.dll", plugin), ("uninstall.exe", plugin)] + extra:
+            for rel, data in [("$PLUGINSDIR/System.dll", plugin), ("$PLUGINSDIR/nsDialogs.dll", dialogs),
+                              ("uninstall.exe", uninst)] + extra:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_bytes(data)
             a.files = [(q.relative_to(root).as_posix(), q) for q in sorted(root.rglob("*")) if q.is_file()]
@@ -505,12 +688,21 @@ def self_test(sevenzip=None):
             a.listing = "a listing\n"
             return a
 
-        lines, errors = pes([installer([])], unsigned)
-        ok("installer: six shipped, one plugin, one uninstaller", errors == [] and lines[-1] ==
-           "all artefacts: nsis-plugin 1, nsis-uninstaller 1, shipped 6")
-        ok("installer: the listing is printed", "a listing" in lines)
-        errors = pes([installer([("$INSTDIR/uninstall.exe", plugin)])], unsigned)[1]
+        lines, errors = pes([installer([], "good")], unsigned, parts)
+        ok("installer: six shipped, two plugins, one uninstaller", errors == [] and lines[-1] ==
+           "all artefacts: nsis-plugin 2, nsis-uninstaller 1, shipped 6")
+        ok("installer: the listing and the first header are printed", "a listing" in lines and
+           f"{setup.name}: first header at 0x400" in lines)
+        errors = pes([installer([("$INSTDIR/uninstall.exe", uninst)], "two-uninst")], unsigned, parts)[1]
         ok("installer: two uninstallers fail", any("2 uninstallers" in e for e in errors))
+        errors = pes([installer([("$PLUGINSDIR/SYSTEM.dll_1", plugin)], "renamed")], unsigned, parts)[1]
+        ok("installer: a duplicate renamed by 7-Zip fits no class", any("SYSTEM.dll_1: fits no class" in e
+                                                                         for e in errors))
+        twice = installer([], "plugin-twice")
+        twice.files.append(("$PLUGINSDIR/system.dll", twice.files[[r for r, _ in twice.files].index(
+            "$PLUGINSDIR/System.dll")][1]))
+        errors = pes([twice], unsigned, parts)[1]
+        ok("installer: a plugin twice fails", any("$PLUGINSDIR's system.dll 2 times" in e for e in errors))
 
         # 7-Zip's -slt listing.
         slt = ("7-Zip 26.03\n\nListing archive: s.exe\n\n--\nPath = s.exe\nType = Nsis\n\n----------\n"
@@ -520,28 +712,35 @@ def self_test(sevenzip=None):
         ok("parse_slt: files only, '/'-separated", parse_slt(slt) == ["$PLUGINSDIR/System.dll", "bin/lpk.exe",
                                                                      "uninstall.exe"])
 
-        # The artefact finder.
-        try:
-            find_artefacts(good)
-            ok("find_artefacts: no installers fails", False)
-        except Fail as e:
-            ok("find_artefacts: no installers fails", "0 x64 installer artefacts" in str(e))
+        # The artefact finder: exactly e7-assets.py's names and SHA256SUMS.
+        def finds(folder, version="0.1.0"):
+            try:
+                return len(find_artefacts(folder, version))
+            except Fail as e:
+                return str(e)
+
+        ok("find_artefacts: no installers fails", "missing: LitePack_0.1.0_x64-setup.exe" in str(finds(good)))
         for arch in MACHINE:
             (good / f"LitePack_0.1.0_{arch}-setup.exe").write_bytes(b"MZ")
         (good / "SHA256SUMS").write_bytes(b"")
-        ok("find_artefacts: the six", len(find_artefacts(good)) == 6)
-        (good / "LitePack_0.2.0_x64-setup.exe").write_bytes(b"MZ")
-        try:
-            find_artefacts(good)
-            ok("find_artefacts: two x64 installers fail", False)
-        except Fail as e:
-            ok("find_artefacts: two x64 installers fail", "2 x64 installer" in str(e))
+        ok("find_artefacts: the six and SHA256SUMS", finds(good) == 6)
+        ok("find_artefacts: another version's names fail", "missing" in str(finds(good, "0.2.0")))
+        (good / "notes.txt").write_bytes(b"x")
+        ok("find_artefacts: an extra file fails", "not an expected asset: notes.txt" in str(finds(good)))
+        (good / "notes.txt").unlink()
+        (good / "LitePack_0.1.0_x64-setup.exe").rename(good / "Litepack_0.1.0_x64-setup.exe")
+        msg = str(finds(good))
+        ok("find_artefacts: a misnamed artefact fails", "missing: LitePack_0.1.0_x64-setup.exe" in msg and
+           "not an expected asset: Litepack_0.1.0_x64-setup.exe" in msg)
 
         # The command line, on the zips alone: it names the missing installers and exits 1.
-        r = subprocess.run([sys.executable, "-I", __file__, "notices", str(zips("cmd")), "--repo", str(repo)],
-                           capture_output=True, text=True)
-        ok("notices: exit 1 without the installers", r.returncode == 1 and "installer" in r.stderr
-           and "Traceback" not in r.stderr)
+        r = subprocess.run([sys.executable, "-I", __file__, "notices", str(zips("cmd")), "--version", "0.1.0",
+                            "--repo", str(repo)], capture_output=True, text=True)
+        ok("notices: exit 1 without the installers", r.returncode == 1 and "missing: LitePack_0.1.0_arm64-setup.exe"
+           in r.stderr and "Traceback" not in r.stderr)
+        r = subprocess.run([sys.executable, "-I", __file__, "nsis-parts", str(nsis_dir)], capture_output=True,
+                           text=True)
+        ok("nsis-parts: the command prints the lines", r.returncode == 0 and r.stdout.splitlines() == part_lines)
 
         # The 7-Zip path, where a 7-Zip is at hand: it reads a zip as it reads an installer, so a zip read both ways
         # gives the same members and the same notices.
