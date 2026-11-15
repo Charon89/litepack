@@ -159,9 +159,11 @@ fn read_head(p: &Path) -> Result<Vec<u8>, Error> {
 
 /// The refusal of a `--keyfile` on an archive encrypted with a password alone, as `lpk` and
 /// `lpk-decode` refuse it (`UnneededKeyfile`): only the header and the key slot are looked at. A
-/// plain archive, or one whose header or key slot cannot be read, passes, and the command
-/// reports it in its own words. A command-line rule, not the decoder's: `Archive::open` still
-/// ignores a keyfile the slot does not take, as the specification's opening steps do.
+/// plain archive, or one whose header or key slot does not parse, passes, and the command
+/// reports it in its own words. A file that cannot be opened or read never gets here: `run`'s
+/// `read_head` fails it first, with the read error the command itself would give. A
+/// command-line rule, not the decoder's: `Archive::open` still ignores a keyfile the slot does
+/// not take, as the specification's opening steps do.
 fn refuse_unneeded_keyfile(archive: &Path, data: &[u8], opts: &Options) -> Result<(), Error> {
     use lpk_check::wire::{kind, parse_frame, parse_header, HEADER_LEN};
     if opts.keyfile.is_none() {

@@ -1619,8 +1619,8 @@ pub fn run() -> i32 {
                     // R364: the webview runs on the primary folder, so the second one (made
                     // while a LitePack that had just ended held the first) is no longer needed:
                     // removed in the background, best effort, at once and 30 s later (a
-                    // browser process of that LitePack may still be ending); a failure is
-                    // logged, never shown, and the next start tries again.
+                    // browser process of that LitePack may still be ending); a failure goes to
+                    // stderr and the e2e log, is never shown, and the next start tries again.
                     if used == lpk_gui::startup::WebviewFolder::Primary {
                         if let Some(state) = paths::state_dir() {
                             let _ = std::thread::Builder::new()
@@ -1630,10 +1630,14 @@ pub fn run() -> i32 {
                                         std::thread::sleep(Duration::from_secs(wait));
                                         match lpk_gui::startup::remove_alternate(&state, used) {
                                             Ok(_) => break,
-                                            Err(e) => eprintln!(
-                                                "lpk-gui: the second WebView2 folder could not \
-                                                 be removed: {e}"
-                                            ),
+                                            Err(e) => {
+                                                let line = format!(
+                                                    "the second WebView2 folder could not be \
+                                                     removed: {e}"
+                                                );
+                                                eprintln!("lpk-gui: {line}");
+                                                e2e_note(&line);
+                                            }
                                         }
                                     }
                                 });

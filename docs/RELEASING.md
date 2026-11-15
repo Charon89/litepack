@@ -96,7 +96,8 @@ The icons in `crates/lpk-gui/icons` are a generated placeholder (`icons/make-pla
   setup failure shows "LitePack could not start" and exits 1 instead of Tauri's panic (exit 101). When the data folder
   stays in use for 2 s (the browser process of a LitePack that ended abruptly still holds it), the GUI uses a second
   folder beside it, `WebView2-2` in the same local state folder, alternating between the two while both are in use
-  (R362); a later start whose webview opens on the first folder removes the second in the background (R364). A panic, a failed start or a failed hand-off to the installer (R348: the process is held until the installer
+  (R362); a later start whose webview opens on the first folder removes the second in the background (R364). A panic,
+  a failed start or a failed hand-off to the installer (R348: the process is held until the installer
   starts) appends a bounded local note to `crash.log` in the local state folder (portable: `data\`): the error, which can name a file
   path, and where in the code it happened; the last 8 at most, under 64 KiB; nothing is sent, and the uninstaller
   removes the folder. Test 6 fails on such a note, and on any non-zero exit of the installed `lpk-gui.exe` (4689).
