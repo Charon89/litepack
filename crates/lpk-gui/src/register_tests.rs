@@ -961,6 +961,9 @@ fn each_architectures_refusal_names_the_other_build() {
         .nth(1)
         .and_then(|s| s.split(arm64_if).next())
         .expect("the x64 branch");
+    // The arm64 branch ends at the unknown-architecture `!else`; without it the split below would run to the end.
+    let after_arm64 = refuse.split(arm64_if).nth(1).expect("the arm64 branch");
+    assert!(after_arm64.contains("\n  !else\n"), "{after_arm64}");
     let arm64 = refuse
         .split(arm64_if)
         .nth(1)

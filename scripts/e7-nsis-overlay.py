@@ -7,8 +7,8 @@ The overlay is crates/lpk-gui/tauri.nsis.conf.json (the one ci.yml's `installer`
 every resource source becomes an absolute path, the five non-GUI PEs' to the files in <dir> (the build job's
 artifact, not target\\release), the notices' and licences' to the repository's own files; and `installerHooks` names
 the architecture's hooks file by its absolute path (installer.nsh for x64, installer-arm64.nsh for arm64: the hooks
-cannot see the template's ${ARCH}, installer-arm64.nsh defines it). Both with forward slashes: tauri-utils reads a
-resource source as a glob pattern, so no backslash reaches it. Every other key, every destination included, is
+cannot see the template's ${ARCH}, installer-arm64.nsh defines it). Both are literal paths written with forward slashes
+for uniformity (tauri-utils reads a resource source as a glob only when it contains `*`, resources.rs). Every other key, every destination included, is
 unchanged. It fails (exit 1) on a missing source, on a resource key it does not recognise, and when the shell
 DLL's `shell/<version>/` destination is not the workspace version (Cargo.toml's `[workspace.package] version`).
 The standard library only (tomllib: Python 3.11 or later).

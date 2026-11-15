@@ -2,8 +2,10 @@
 there. cargo-auditable embeds the dependency list of a binary in a `.dep-v0` section; a shipped PE without it was
 built without `cargo auditable`, so the build fails. The standard library alone: the DOS header's `e_lfanew`, the
 `PE\\0\\0` signature, the COFF header's section count and optional-header size, then 40-byte section headers whose
-first 8 bytes are the name (an image's names are at most 8 bytes, no string-table form). `--machine` (E7-2 part 1b,
-release.yml's install-arm64 job) reads the COFF header's Machine field instead (0x8664 x64, 0xAA64 ARM64, 0x14C x86).
+first 8 bytes are the name (an image's names are at most 8 bytes, no string-table form). `--machine` (E7-2 part 1b)
+reads the COFF header's Machine field instead (0x8664 x64, 0xAA64 ARM64, 0x14C x86), for jobs that have Python. The
+windows-11-arm jobs (release.yml's install-arm64, release-checks.yml's arm64-smoke) read the machine with `od`
+instead: setup-python could not install Python 3.13.7 on that runner.
 
     python -I scripts/e7-pe-sections.py --list <pe>                     the section names, one per line
     python -I scripts/e7-pe-sections.py --require <section> <pe>...     exit 1 naming each PE without the section

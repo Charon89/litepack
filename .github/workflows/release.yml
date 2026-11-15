@@ -291,7 +291,7 @@ jobs:
             python -I scripts/e7-nsis-overlay.py --arch "$arch" --bin "$bin" --repo "$(cygpath -m "$PWD")" \
               --out "$T/installers/overlay-$arch.json"
             log="$T/installers/bundle-$arch.log"
-            # -v: tauri-bundler runs makensis with -V4 and shows its output, so its warnings can be checked (R330).
+            # -v: tauri-bundler runs makensis with -V3 and shows its output, so its warnings can be checked (R330).
             (cd crates/lpk-gui && cargo tauri bundle --ci -v --bundles nsis --target "$triple" --no-binary-patching \
               --no-sign --config "$T/installers/overlay-$arch.json") 2>&1 | tee "$log"
             grep -q "Processing script file" "$log" || { echo "$log holds no makensis output"; exit 1; }
@@ -345,6 +345,8 @@ jobs:
           cat installers.sha256
           test "$(wc -l < installers.sha256)" = 2
           echo "sha256=$(sha256sum installers.sha256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      # The artifact holds the two setups with installers.sha256, and also each architecture's overlay
+      # (overlay-<arch>.json) and bundle log (bundle-<arch>.log): the evidence of how each setup was built.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installers
@@ -404,10 +406,8 @@ jobs:
       run:
         shell: bash
     steps:
+      # No setup-python here: it could not install 3.13.7 on windows-11-arm; this job uses bash and coreutils only.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.13.7"
       - name: Work folders
         run: |
           echo "T=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
@@ -439,9 +439,17 @@ jobs:
           test "$rc" -eq 0
           ls -laR "$INST"
           pes=(lpk-gui.exe bin/lpk.exe bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe "shell/$VERSION/lpk_shell.dll")
-          (cd "$INST" && python -I "$GITHUB_WORKSPACE/scripts/e7-pe-sections.py" --machine 0xAA64 "${pes[@]}")
+          # The COFF Machine field read with od, as release-checks.yml's arm64-smoke does (no Python on this runner:
+          # setup-python could not install 3.13.7 on windows-11-arm).
           for p in "${pes[@]}"; do
-            want="$(grep -E " \*?$(basename "$p")\$" "$T/unsigned-arm64/unsigned.sha256" | cut -d ' ' -f 1)"
+            b="$INST/$p"
+            pe=$(od -An -tu4 -j60 -N4 "$b" | tr -d ' ')
+            m=$(od -An -tx2 -j$((pe + 4)) -N2 "$b" | tr -d ' ')
+            echo "$p: machine 0x$m"
+            [ "$m" = "aa64" ] || { echo "error: $p is not ARM64" >&2; exit 1; }
+          done
+          for p in "${pes[@]}"; do
+            want="$(grep -E " \*?$(basename "$p")\$" "$T/unsigned-arm64/unsigned.sha256" | cut -d ' ' -f 1 || true)"
             got="$(sha256sum "$INST/$p" | cut -d ' ' -f 1)"
             test -n "$want" && test "$got" = "$want" || { echo "$p: installed $got, built $want"; exit 1; }
             echo "$p: the built one"

@@ -335,7 +335,7 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
 - `refuse-arm64-on-x64` (windows-2025): the ARM64 installer run with `/S` exits non-zero within 300 s and writes
   nothing under `%LOCALAPPDATA%\LitePack`.
 - `install-arm64` (windows-11-arm): the ARM64 installer run with `/S` installs. Each installed PE is machine 0xAA64
-  (`e7-pe-sections.py --machine`) and byte-equal to the build's. `bin\lpk.exe --version` runs, and `bin\lpk.exe`
+  (the COFF Machine field read with `od`, as `arm64-smoke` does: the job has no Python) and byte-equal to the build's. `bin\lpk.exe --version` runs, and `bin\lpk.exe`
   round-trips a small folder. A silent uninstall (waited on with `e7-wait-uninstaller.sh`) leaves no install folder.
 
 **The ARM64 installer.** The hooks cannot see the template's `${ARCH}`, so the ARM64 overlay names
