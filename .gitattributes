@@ -1,3 +1,6 @@
 # LF in the repository and in every working tree, so a checkout is byte-identical on every
 # machine and on CI regardless of each machine's core.autocrlf.
 * text=auto eol=lf
+# Batch files (scripts/cargo-auditable.cmd, E7-2): CRLF in every working tree, the line end cmd.exe expects
+# (it misreads labels and some lines of an LF batch file). Still byte-identical on every machine.
+*.cmd text eol=crlf
