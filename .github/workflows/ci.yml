@@ -113,9 +113,11 @@ jobs:
       - name: The two pin scripts bound every download the same way
         shell: bash
         run: bash scripts/notice-curl-test.sh
-      - name: NSIS archive and plugin match notices/nsis
+      - name: NSIS archive and plugin match notices/nsis; the plugin's crates are covered by the notices
         shell: bash
-        run: scripts/nsis-notice.sh --check
+        run: |
+          python3 -I scripts/nsis-lock-check.py --self-test
+          scripts/nsis-notice.sh --check
       - name: Fetch the locked crates (webview2-com-sys's vendored loader)
         run: cargo fetch --locked
       - name: WebView2 licence text and loader libraries match notices/webview2.toml
@@ -159,6 +161,19 @@ jobs:
       - name: The exe opens an archive from the command line
         shell: bash
         run: bash crates/lpk-gui/smoke.sh target/debug/lpk.exe target/release/lpk-gui.exe "$RUNNER_TEMP/gui-smoke"
+      # E7-7 (R320): the Store build (E7-4) turns the `updater` feature off; it builds and lints clean without it, and
+      # its tree holds no tauri-plugin-updater (also crates/lpk-gui/tests/updater_feature.rs).
+      - name: The Store build compiles without the updater
+        shell: bash
+        run: |
+          cargo clippy --locked -p lpk-gui --all-targets --no-default-features -- -D warnings
+          # R327: the test build's hook lints clean and its unit tests pass (they exist only with the feature).
+          cargo clippy --locked -p lpk-gui --all-targets --features update-e2e -- -D warnings
+          cargo test --locked -p lpk-gui --features update-e2e --lib security::update_e2e
+          if cargo tree --locked -p lpk-gui --no-default-features -e normal --prefix none | grep -q '^tauri-plugin-updater '; then
+            echo "tauri-plugin-updater in the Store build's tree" >&2
+            exit 1
+          fi
       # E6-4: --register-shell --open-with and --unregister-shell on this runner's own registry (HKCU) leave it as
       # found, `.lpk` opens in LitePack and no UserChoice changes (the script refuses to run unless CI=true).
       - name: Shell registration leaves the registry as found
@@ -188,6 +203,26 @@ jobs:
           test "$(grep -a -c 'LPK_GUI_SMOKE_REPORT' "$exe")" -gt 0
           if grep -a -qF 'LPK_GUI_WEBDRIVER' "$exe"; then
             echo "the WebDriver switch reached the shipped lpk-gui.exe" >&2
+            exit 1
+          fi
+      # E7-7 (R327): the update test hook (lpk-gui's cargo feature `update-e2e`) and its overlay
+      # (tauri.update-e2e.conf.json: the localhost endpoint) are not in the shipped exe; the release endpoint is the
+      # control (present), and the shipped tauri.conf.json keeps the placeholder key and its one HTTPS endpoint.
+      - name: No update test hook in the exe
+        shell: bash
+        run: |
+          exe=target/release/lpk-gui.exe
+          test "$(grep -a -c 'releases/latest/download/latest.json' "$exe")" -gt 0
+          for marker in 'LPK_GUI_UPDATE_E2E' '127.0.0.1:8737' 'CI writes the run'; do
+            if grep -a -qF "$marker" "$exe"; then
+              echo "the update test hook or overlay reached the shipped lpk-gui.exe: $marker" >&2
+              exit 1
+            fi
+          done
+          grep -qF '"pubkey": "E7-7 replaces this with the release signing public key"' crates/lpk-gui/tauri.conf.json
+          grep -qF '"endpoints": ["https://github.com/Charon89/litepack/releases/latest/download/latest.json"]' crates/lpk-gui/tauri.conf.json
+          if grep -q 'update-e2e\|127.0.0.1' crates/lpk-gui/tauri.conf.json; then
+            echo "the shipped tauri.conf.json names the test build" >&2
             exit 1
           fi
 
@@ -356,7 +391,7 @@ jobs:
         run: cargo tauri build --ci -- --locked
       - name: Make both zips
         run: |
-          version="$(python -I -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          version="$(python -I -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])" | tr -d '\r')"
           python -I scripts/make-zips.py --bin target/release --arch x64 --version "$version" \
             --timestamp "$(git log -1 --format=%ct)" --out "$ZIPS"
           for z in "$ZIPS"/*.zip; do python -I -m zipfile -l "$z"; done
@@ -474,6 +509,760 @@ jobs:
           path: ${{ env.ZIPS }}/*.zip
           retention-days: 3
           if-no-files-found: error
+
+  # E7-5 part 1: the per-user NSIS installer (route C, no sparse package; R303 to R308), built only here through the
+  # overlay crates/lpk-gui/tauri.nsis.conf.json (the default build stays unbundled), at the workspace's version N and
+  # at N+1 (0.0.2); installed, smoke-run, upgraded while bin\lpk.exe runs, uninstalled, with the residue diffs.
+  installer:
+    name: installer (windows-2025)
+    timeout-minutes: 120
+    runs-on: windows-2025
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Work folders
+        run: |
+          echo "SNAP=$(cygpath -m "$RUNNER_TEMP")/residue" >> "$GITHUB_ENV"
+          echo "SETUP=$(cygpath -m "$RUNNER_TEMP")/setup" >> "$GITHUB_ENV"
+          echo "W=$(cygpath -m "$RUNNER_TEMP")/work" >> "$GITHUB_ENV"
+          echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: installer
+          workspaces: |
+            . -> target
+            workers -> ../target
+      - name: The residue and version-bump scripts' own tests
+        run: |
+          python -I scripts/e7-residue.py --self-test
+          python -I scripts/e7-bump-version.py --self-test
+          python -I scripts/e7-sha256.py --self-test
+          python -I scripts/e7-runonce.py --self-test
+      - name: tauri-cli through cargo (pinned)
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build the release binaries
+        run: |
+          cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell
+          (cd workers && cargo build --release --locked)
+          ls -la target/release/*.exe target/release/*.dll
+      - name: Build the installers N and N+1 through the overlay
+        working-directory: crates/lpk-gui
+        run: |
+          mkdir -p "$SETUP"
+          # -v: tauri-bundler runs makensis with -V4 and shows its output, so its warnings can be checked (R330).
+          cargo tauri build --ci -v --config tauri.nsis.conf.json -- --locked 2>&1 | tee "$SETUP/build-N.log"
+          cp target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe" 2>/dev/null \
+            || cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe"
+          python -I -c "
+          import json
+          c = json.load(open('tauri.nsis.conf.json'))
+          c['version'] = '0.0.2'
+          r = c['bundle']['resources']
+          for k, v in list(r.items()):
+              if v.startswith('shell/'):
+                  r[k] = 'shell/0.0.2/lpk_shell.dll'
+          json.dump(c, open('$SETUP/next.conf.json', 'w'), indent=2)
+          "
+          # N+1 entirely at 0.0.2 (R329): the workspaces' version too, so every binary differs from N's and the
+          # upgrade's overwrite of a running bin\lpk.exe is visible in the hashes.
+          (cd ../.. && python -I scripts/e7-bump-version.py 0.0.1 0.0.2 \
+            && cargo update --workspace --offline && (cd workers && cargo update --workspace --offline))
+          (cd ../.. && cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell \
+            && (cd workers && cargo build --release --locked))
+          rm -rf ../../target/release/bundle/nsis
+          cargo tauri build --ci -v --config "$SETUP/next.conf.json" -- --locked 2>&1 | tee "$SETUP/build-N1.log"
+          # R330: any makensis warning 6000 (an unknown variable, such as one declared after the hooks' include) fails
+          # the job; the logs must hold makensis's own output, so the grep cannot pass by seeing none.
+          for log in "$SETUP/build-N.log" "$SETUP/build-N1.log"; do
+            grep -q "Processing script file" "$log" || { echo "$log holds no makensis output"; exit 1; }
+            if grep -nE "warning 6000" "$log"; then echo "makensis warning 6000 in $log"; exit 1; fi
+          done
+          cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
+          (cd ../../target/release && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe \
+            lpk-gui.exe > "$SETUP/N1.sha256")
+          cat "$SETUP/N1.sha256"
+          ls -la "$SETUP"
+      # For the ARM64 refusal job below, before any step that could fail.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-x64
+          path: ${{ env.SETUP }}/N-setup.exe
+          retention-days: 3
+          if-no-files-found: error
+      - name: Snapshot before
+        run: |
+          mkdir -p "$SNAP" "$W/in/sub"
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+      - name: Install N silently and check the layout, the notices, the Uninstall key, Path and route C
+        run: |
+          "$SETUP/N-setup.exe" /S
+          ls -laR "$INST"
+          for f in lpk-gui.exe uninstall.exe THIRD-PARTY-NOTICES LICENSE-APACHE LICENSE-MIT bin/lpk.exe \
+            bin/lpk-check.exe bin/lpk-worker.exe bin/lpk-worker-libarchive.exe shell/0.0.1/lpk_shell.dll; do
+            test -f "$INST/$f" || { echo "missing: $f"; exit 1; }
+          done
+          cmp THIRD-PARTY-NOTICES "$INST/THIRD-PARTY-NOTICES"
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.1
+      - name: The installed GUI opens a .lpk and a .zip (the worker from bin\ makes the profile)
+        run: |
+          for i in 1 2 3; do echo "file $i" > "$W/in/sub/f$i.txt"; done
+          "$INST/bin/lpk.exe" a "$W/small.lpk" "$W/in"
+          "$INST/bin/lpk.exe" export "$W/small.lpk" "$W/small.zip"
+          for a in small.lpk small.zip; do
+            LPK_GUI_SMOKE_REPORT="$W/report-$a.json" timeout 180 "$INST/lpk-gui.exe" "$W/$a"
+            report="$(cat "$W/report-$a.json")"
+            echo "report ($a): $report"
+            grep -q '"problems":\[\]' <<<"$report"
+            grep -qE '"rendered":[1-9]' <<<"$report"
+          done
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-gui.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-gui.json" \
+            --require-worker-profile --allow-settings --run-folder "$INST" > "$SNAP/2.txt" || true
+          cat "$SNAP/2.txt"
+          grep -q "PROFILE MISSING" "$SNAP/2.txt" && echo "no worker profile after the installed GUI" >> "$SNAP/verdicts" || true
+      - name: bin\lpk.exe on the .zip
+        run: |
+          "$INST/bin/lpk.exe" l "$W/small.zip"
+          "$INST/bin/lpk.exe" x "$W/small.zip" "$W/out-cli"
+          cmp "$W/in/sub/f2.txt" "$W/out-cli/sub/f2.txt"
+      # R334: the upgrade runs beside a bin\lpk.exe that is still compressing. Windows refuses to overwrite a running
+      # executable but lets it be renamed: PREINSTALL sets each of bin\'s executables aside as <name>.old-<n> before
+      # the copy (installer.nsh). The step requires that lpk.exe is still running when the upgrade starts, rc 0, every
+      # installed binary N+1's, the held one set aside, and the running lpk.exe's own result (exit code, `lpk t`).
+      # The .sha256 files are read through scripts/e7-sha256.py: Git Bash's sha256sum writes `<hash> *<name>`.
+      - name: Upgrade to N+1 silently while bin\lpk.exe runs
+        run: |
+          # About 256 MiB of text-like data (scripts/e7-gen-text.py): no chunk repeats, so dedup cannot shorten it,
+          # and single-threaded LZMA takes minutes on it.
+          python -I scripts/e7-gen-text.py "$W/big.txt" 256
+          ls -la "$W/big.txt"
+          start=$SECONDS
+          "$INST/bin/lpk.exe" a --balanced --threads 1 "$W/big.lpk" "$W/big.txt" > "$W/running.log" 2>&1 &
+          pid=$!
+          sleep 10
+          (cd "$INST/bin" && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe) > "$W/N.sha256"
+          echo "N's bin\\ before the upgrade:"; cat "$W/N.sha256"
+          # R330: N's lpk.exe must differ from N+1's, so the overwrite check below cannot pass vacuously.
+          n_lpk="$(python -I scripts/e7-sha256.py "$W/N.sha256" lpk.exe)"
+          n1_lpk="$(python -I scripts/e7-sha256.py "$SETUP/N1.sha256" lpk.exe)"
+          test "$n_lpk" != "$n1_lpk" || { echo "N's and N+1's lpk.exe are the same ($n_lpk)"; exit 1; }
+          kill -0 "$pid" 2>/dev/null || {
+            cat "$W/running.log"
+            echo "lpk.exe exited before the upgrade began; the test cannot show an upgrade while it runs"; exit 1; }
+          echo "bin\\lpk.exe is running (pid $pid, $((SECONDS - start)) s) when the upgrade starts"
+          rc=0; "$SETUP/N1-setup.exe" /S || rc=$?
+          echo "upgrade while lpk.exe ran: installer exit code $rc after $((SECONDS - start)) s"
+          if kill -0 "$pid" 2>/dev/null; then still=yes; else still=no; fi
+          echo "bin\\lpk.exe still running when the upgrade ended: $still"
+          ls -laR "$INST"
+          # Pending renames (read only): a file the installer could not replace would be queued here for a reboot.
+          python -I -c "
+          import winreg, sys
+          inst = sys.argv[1].replace('/', chr(92)).lower()
+          try:
+              with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\Session Manager') as k:
+                  ops = winreg.QueryValueEx(k, 'PendingFileRenameOperations')[0]
+          except OSError:
+              ops = []
+          hits = [o for o in ops if inst in o.lower()]
+          print(f'PendingFileRenameOperations: {len(ops)} entries, {len(hits)} under the install folder', hits)
+          " "$INST"
+          # R335: any RunOnce value the upgrade wrote (an old shell folder Explorer holds) is at most 260 characters.
+          echo "RunOnce LitePack values after the upgrade:"; python -I scripts/e7-runonce.py show
+          set_aside="$(cd "$INST/bin" && ls -1 -- *.old-* 2>/dev/null || true)"
+          echo "set aside in bin\\ after the upgrade: ${set_aside:-none}"
+          lpk_rc=0; wait "$pid" || lpk_rc=$?
+          echo "the running lpk.exe exited with $lpk_rc after $((SECONDS - start)) s; its output:"; cat "$W/running.log"
+          echo "bin\\ after the upgrade, against N+1's inputs:"
+          names="$(python -I scripts/e7-sha256.py --names "$SETUP/N1.sha256")"
+          bad=0
+          for name in $names; do
+            sum="$(python -I scripts/e7-sha256.py "$SETUP/N1.sha256" "$name")"
+            if [ "$name" = lpk-gui.exe ]; then file="$INST/lpk-gui.exe"; else file="$INST/bin/$name"; fi
+            got="missing"
+            if [ ! -f "$file" ]; then :
+            elif [ "$name" = lpk-gui.exe ]; then
+              # R340: tauri-bundler patches the bundle-type token into the lpk-gui.exe it packs (patch_binary), so
+              # the installed file is compared with the token turned back (scripts/e7-bundled-hash.py, E7-7's).
+              got="$(python -I scripts/e7-bundled-hash.py "$file" | tr -d '\r')" || { echo "$got"; got="unpatched"; }
+            else
+              got="$(sha256sum "$file" | cut -d' ' -f1)"
+            fi
+            echo "$name: installed $got, N+1 $sum"
+            [ "$got" = "$sum" ] || bad=1
+          done
+          # The running lpk.exe's archive is tested whatever the checks below find (R340).
+          t_rc=0; "$INST/bin/lpk.exe" t "$W/big.lpk" || t_rc=$?
+          echo "lpk t on the running lpk.exe's archive (N+1's lpk.exe): exit $t_rc"
+          test "$rc" -eq 0 || { echo "the upgrade's installer failed with $rc"; exit 1; }
+          test "$bad" -eq 0 || { echo "a file of bin\\ or the GUI is not N+1's after the upgrade"; exit 1; }
+          # R336: a pass must prove the set-aside, so lpk.exe must still run when the upgrade ends.
+          test "$still" = yes || { echo "bin\\lpk.exe exited while the upgrade ran; the set-aside is not shown"; exit 1; }
+          grep -qxF "lpk.exe.old-1" <<<"$set_aside" \
+            || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
+          test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the upgrade"; exit 1; }
+          test "$t_rc" -eq 0 || { echo "the running lpk.exe's archive does not test as valid"; exit 1; }
+          echo "the running lpk.exe's archive tests as valid with N+1's lpk.exe"
+          rm -f "$W/big.txt" "$W/big.lpk"
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
+      - name: Uninstall silently, then the residue against the first snapshot (profile not allowed)
+        run: |
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST"
+          ls -la "$INST" 2>/dev/null || echo "install folder gone"
+          # R334: the upgrade's set-aside lpk.exe.old-1 (its process has exited) goes with the uninstall.
+          if ls -la "$INST/bin/"*.old-* 2>/dev/null; then echo "after the uninstall: a set-aside executable left" >> "$SNAP/verdicts"; fi
+          python -I scripts/e7-residue.py snapshot "$SNAP/3-after-uninstall.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/3-after-uninstall.json" \
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall: residue" >> "$SNAP/verdicts"
+      - name: Install and uninstall with /DELETEAPPDATA (the box), the settings gone
+        run: |
+          "$SETUP/N-setup.exe" /S
+          mkdir -p "$APPDATA/LitePack"; echo '{}' > "$APPDATA/LitePack/settings.json"
+          "$INST/uninstall.exe" /S /DELETEAPPDATA
+          scripts/e7-wait-uninstaller.sh "$INST"
+          test ! -e "$APPDATA/LitePack" || echo "the box: %APPDATA%\\LitePack left" >> "$SNAP/verdicts"
+          python -I scripts/e7-residue.py snapshot "$SNAP/4-after-box.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/4-after-box.json" \
+            --allow-uninstaller-copy --run-folder "$INST" || echo "after the uninstall with the box: residue" >> "$SNAP/verdicts"
+      # R329, R335, R336: a shell DLL held at uninstall (simulated: a process holds it open without delete sharing)
+      # leaves one RunOnce value, `LitePack uninstall`, of at most 260 characters: one cmd line that deletes the DLL,
+      # then only empty folders; a reinstall before the next logon cancels it. scripts/e7-runonce.py lists them (LF only)
+      # and runs them as the next logon would.
+      - name: A held shell DLL at uninstall - the RunOnce commands, then a reinstall cancelling them
+        run: |
+          dll="$INST/shell/0.0.1/lpk_shell.dll"
+          hold() { python -I -c "import sys, time; f = open(sys.argv[1], 'rb'); print('held', flush=True); time.sleep(900)" "$dll" & holder=$!; sleep 2; }
+          for part in logon reinstall; do
+            "$SETUP/N-setup.exe" /S
+            hold
+            "$INST/uninstall.exe" /S
+            scripts/e7-wait-uninstaller.sh "$INST" || true
+            ls -laR "$INST" || true
+            cmds="$(python -I scripts/e7-runonce.py show)" \
+              || echo "held DLL: a RunOnce command over 260 characters ($part)" >> "$SNAP/verdicts"
+            echo "RunOnce LitePack values ($part):"; echo "$cmds"
+            test -n "$cmds" || { echo "held DLL: no RunOnce command" >> "$SNAP/verdicts"; kill "$holder"; continue; }
+            case "$cmds" in *"/s"*|*"/S"*) echo "held DLL: a RunOnce command is recursive" >> "$SNAP/verdicts";; esac
+            grep -qE "^LitePack uninstall[[:space:]]" <<<"$cmds" || echo "held DLL: no 'LitePack uninstall' value" >> "$SNAP/verdicts"
+            kill "$holder"; wait "$holder" 2>/dev/null || true
+            if [ "$part" = logon ]; then
+              # What the next logon runs, in order; each value is deleted after it ran, as Windows does.
+              python -I scripts/e7-runonce.py run
+              test ! -e "$INST" || { ls -laR "$INST"; echo "held DLL: the RunOnce commands left $INST" >> "$SNAP/verdicts"; }
+              test -z "$(python -I scripts/e7-runonce.py show)" || echo "held DLL: RunOnce values left after the run" >> "$SNAP/verdicts"
+            else
+              "$SETUP/N-setup.exe" /S
+              test -z "$(python -I scripts/e7-runonce.py show)" || echo "held DLL: a reinstall did not cancel the RunOnce commands" >> "$SNAP/verdicts"
+              test -f "$INST/lpk-gui.exe" || echo "held DLL: the reinstall is incomplete" >> "$SNAP/verdicts"
+              "$INST/uninstall.exe" /S
+              scripts/e7-wait-uninstaller.sh "$INST"
+            fi
+          done
+      # R336: an uninstall while bin\lpk.exe runs. The uninstaller renames it aside (bin\lpk.exe.old-1) and leaves one
+      # RunOnce value, `LitePack uninstall`, that removes it and the then-empty folders; run as the next logon would
+      # (scripts/e7-runonce.py, in a seeded random order), nothing of the install is left.
+      - name: Uninstall while bin\lpk.exe runs, then the next logon's RunOnce command
+        run: |
+          "$SETUP/N-setup.exe" /S
+          python -I scripts/e7-gen-text.py "$W/big2.txt" 128
+          "$INST/bin/lpk.exe" a --balanced --threads 1 "$W/big2.lpk" "$W/big2.txt" > "$W/running2.log" 2>&1 &
+          pid=$!
+          sleep 10
+          kill -0 "$pid" 2>/dev/null || {
+            cat "$W/running2.log"
+            echo "lpk.exe exited before the uninstall began; the test cannot show an uninstall while it runs"; exit 1; }
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST" || true
+          kill -0 "$pid" 2>/dev/null || { echo "lpk.exe exited during the uninstall; the set-aside is not shown"; exit 1; }
+          echo "bin\\lpk.exe still running after the uninstall; what is left:"; ls -laR "$INST" || true
+          test -f "$INST/bin/lpk.exe.old-1" || { echo "the running bin\\lpk.exe was not set aside as lpk.exe.old-1"; exit 1; }
+          cmds="$(python -I scripts/e7-runonce.py show)" \
+            || { echo "$cmds"; echo "a RunOnce command over 260 characters"; exit 1; }
+          echo "RunOnce LitePack values:"; echo "$cmds"
+          grep -qE "^LitePack uninstall[[:space:]]" <<<"$cmds" || { echo "no 'LitePack uninstall' value"; exit 1; }
+          lpk_rc=0; wait "$pid" || lpk_rc=$?
+          echo "the running lpk.exe exited with $lpk_rc"; cat "$W/running2.log"
+          test "$lpk_rc" -eq 0 || { echo "the running lpk.exe failed with $lpk_rc across the uninstall"; exit 1; }
+          # R343: the next logon comes long after the process ended. Wait (at most 30 s) until every set-aside file
+          # can be opened for writing, which Windows refuses while its image is still mapped.
+          python -I -c "
+          import glob, os, sys, time
+          files = glob.glob(os.path.join(sys.argv[1], 'bin', 'lpk*.exe.old-*'))
+          end = time.time() + 30
+          for f in files:
+              while True:
+                  try:
+                      open(f, 'r+b').close()
+                      print('deletable:', f, flush=True)
+                      break
+                  except OSError as e:
+                      if time.time() > end:
+                          sys.exit(f'still held after 30 s: {f} ({e})')
+                      time.sleep(0.5)
+          " "$INST"
+          # R343's diagnosis of run 42944220039 (the old command left lpk.exe.old-1): its `del`, alone, on a copy of
+          # the folder (no shell\, bin\lpk.exe.old-1), then each name alone; each with its output and exit code.
+          python -I -c "
+          import os, shutil, subprocess, sys
+          src, d = sys.argv[1], sys.argv[2]
+          for args in ([r'shell\0.0.1\lpk_shell.dll', r'bin\lpk*.exe.old-*'], [r'bin\lpk*.exe.old-*'],
+                       [r'bin\lpk.exe.old-1']):
+              shutil.rmtree(d, ignore_errors=True)
+              os.makedirs(os.path.join(d, 'bin'))
+              shutil.copy(os.path.join(src, 'bin', 'lpk.exe.old-1'), os.path.join(d, 'bin', 'lpk.exe.old-1'))
+              cmd = 'del /f /q ' + ' '.join(args)
+              p = subprocess.run(['cmd.exe', '/d', '/v:off', '/c', cmd], cwd=d, capture_output=True, text=True)
+              left = os.path.exists(os.path.join(d, 'bin', 'lpk.exe.old-1'))
+              print(f'diagnosis: {cmd!r}: exit {p.returncode}, output {(p.stdout + p.stderr).strip()!r}, '
+                    f'lpk.exe.old-1 {\"left\" if left else \"deleted\"}')
+          shutil.rmtree(d, ignore_errors=True)
+          " "$INST" "$W/del-diag"
+          python -I scripts/e7-runonce.py run
+          test ! -e "$INST" || { ls -laR "$INST"; echo "the RunOnce command left $INST"; exit 1; }
+          test -z "$(python -I scripts/e7-runonce.py show)" || { echo "RunOnce values left after the run"; exit 1; }
+          rm -f "$W/big2.txt" "$W/big2.lpk"
+          echo "uninstall while lpk.exe ran: nothing of the install left after the next logon's command"
+      # R330: the held-DLL step's installs and uninstalls are compared with the first snapshot too.
+      - name: Residue after the held-DLL step, against the first snapshot (same allowances as the final diff)
+        run: |
+          python -I scripts/e7-residue.py snapshot "$SNAP/5-after-held.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/5-after-held.json" \
+            --allow-uninstaller-copy --run-folder "$INST" || echo "after the held-DLL step: residue" >> "$SNAP/verdicts"
+      - name: Residue verdict
+        run: |
+          if [ -s "$SNAP/verdicts" ]; then cat "$SNAP/verdicts"; exit 1; fi
+          echo "installer: installed, upgraded and uninstalled with nothing left but the allowed entries"
+
+  # E7-7 test 6 (R327, R332): N updates to N+1 end to end. Two TEST installers (the `update-e2e` feature and the overlay
+  # tauri.update-e2e.conf.json, chained after E7-5's NSIS overlay with a second --config) hold a key pair generated in
+  # this job; a Python server on 127.0.0.1:8737 stands in for GitHub Releases. First a payload with one byte flipped is
+  # refused (nothing installs); then the hook presses "Install and restart" and N+1's passive installer must leave
+  # N+1's binaries, the registration, Path and the settings, and the uninstall no residue. No shipped build has the
+  # hook or the overlay (the gui job's "No update test hook in the exe").
+  updater-e2e:
+    name: updater-e2e (windows-2025)
+    timeout-minutes: 120
+    runs-on: windows-2025
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Work folders
+        run: |
+          t="$(cygpath -m "$RUNNER_TEMP")"
+          {
+            echo "SNAP=$t/residue"; echo "SETUP=$t/setup"; echo "W=$t/work"; echo "KEYS=$t/keys"; echo "SRV=$t/srv"
+            echo "INST=$(cygpath -m "$LOCALAPPDATA")/LitePack"
+            echo "STATE=$(cygpath -m "$LOCALAPPDATA")/org.litepack.gui"
+            echo "SETTINGS=$(cygpath -m "$APPDATA")/LitePack/settings.json"
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.7"
+      - name: Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: updater-e2e
+          workspaces: |
+            . -> target
+            workers -> ../target
+      - name: tauri-cli through cargo (pinned)
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: A throwaway signing key for this run (R318; never committed, the secret never printed)
+        run: |
+          mkdir -p "$KEYS"
+          pw="$(python -I -c 'import secrets; print(secrets.token_hex(16))')"
+          echo "::add-mask::$pw"
+          echo "KEYPW=$pw" >> "$GITHUB_ENV"
+          cargo tauri signer generate --ci -p "$pw" -w "$KEYS/test.key" > /dev/null
+          echo "public key (base64): $(cat "$KEYS/test.key.pub")"
+          python -I -c "
+          import json, sys
+          c = json.load(open('crates/lpk-gui/tauri.update-e2e.conf.json'))
+          c['plugins']['updater']['pubkey'] = open(sys.argv[1]).read().strip()
+          json.dump(c, open(sys.argv[2], 'w'), indent=2)
+          " "$KEYS/test.key.pub" "$KEYS/e2e.conf.json"
+      - name: Build the release binaries
+        run: |
+          cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell
+          (cd workers && cargo build --release --locked)
+      - name: Build the test installers N (0.0.1) and N+1 (0.0.2), feature update-e2e, both overlays chained
+        working-directory: crates/lpk-gui
+        run: |
+          mkdir -p "$SETUP"
+          e2e=(--features update-e2e --config tauri.nsis.conf.json)
+          cargo tauri build --ci "${e2e[@]}" --config "$KEYS/e2e.conf.json" -- --locked 2>&1 | tee "$SETUP/build-N.log"
+          cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N-setup.exe"
+          python -I -c "
+          import json
+          c = json.load(open('tauri.nsis.conf.json'))
+          c['version'] = '0.0.2'
+          r = c['bundle']['resources']
+          for k, v in list(r.items()):
+              if v.startswith('shell/'):
+                  r[k] = 'shell/0.0.2/lpk_shell.dll'
+          json.dump(c, open('$SETUP/next.conf.json', 'w'), indent=2)
+          "
+          (cd ../.. && python -I scripts/e7-bump-version.py 0.0.1 0.0.2 \
+            && cargo update --workspace --offline && (cd workers && cargo update --workspace --offline))
+          (cd ../.. && cargo build --release --locked -p lpk-cli -p lpk-check -p lpk-worker-libarchive -p lpk-shell \
+            && (cd workers && cargo build --release --locked))
+          rm -rf ../../target/release/bundle/nsis
+          cargo tauri build --ci --features update-e2e --config "$SETUP/next.conf.json" --config "$KEYS/e2e.conf.json" \
+            -- --locked 2>&1 | tee "$SETUP/build-N1.log"
+          cp ../../target/release/bundle/nsis/*-setup.exe "$SETUP/N1-setup.exe"
+          # sha256sum under Git Bash marks binary mode with '*' ("<hash> *lpk.exe"); write the plain
+          # "<hash>  <name>" form, so every reader below sees bare names.
+          (cd ../../target/release && sha256sum lpk.exe lpk-check.exe lpk-worker.exe lpk-worker-libarchive.exe \
+            lpk-gui.exe | sed 's/ [*]/  /' > "$SETUP/N1.sha256")
+          cat "$SETUP/N1.sha256"
+          ls -la "$SETUP"
+      - name: Sign N+1 (version recorded for requireSignedVersion), a flipped copy, and start the local server
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ runner.temp }}/keys/test.key
+        run: |
+          good="$SRV/Charon89/litepack/releases/download/v0.0.2"; bad="$SRV/Charon89/litepack/releases/download/v0.0.2-bad"
+          mkdir -p "$good" "$bad" "$SRV/releases/latest/download"
+          cp "$SETUP/N1-setup.exe" "$good/LitePack_0.0.2_x64-setup.exe"
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEYPW" cargo tauri signer sign --app-version 0.0.2 \
+            "$good/LitePack_0.0.2_x64-setup.exe" > /dev/null
+          ls -la "$good"
+          # The negative case: the same signature over a payload with one byte flipped.
+          python -I -c "
+          import sys
+          b = bytearray(open(sys.argv[1], 'rb').read()); b[len(b) // 2] ^= 0x01
+          open(sys.argv[2], 'wb').write(b)
+          " "$good/LitePack_0.0.2_x64-setup.exe" "$bad/LitePack_0.0.2_x64-setup.exe"
+          manifest() {
+            python -I -c "
+          import json, sys
+          p = {'url': sys.argv[1], 'signature': open(sys.argv[2]).read().strip()}
+          json.dump({'version': '0.0.2', 'notes': 'E7-7 test 6', 'pub_date': '2026-11-10T00:00:00Z',
+                     'platforms': {'windows-x86_64': p}}, open(sys.argv[3], 'w'), indent=2)
+          " "$1" "$good/LitePack_0.0.2_x64-setup.exe.sig" "$2"
+          }
+          manifest "http://127.0.0.1:8737/Charon89/litepack/releases/download/v0.0.2/LitePack_0.0.2_x64-setup.exe" "$W.good.json"
+          manifest "http://127.0.0.1:8737/Charon89/litepack/releases/download/v0.0.2-bad/LitePack_0.0.2_x64-setup.exe" "$W.bad.json"
+          cat "$W.good.json"
+          python -I -m http.server 8737 --bind 127.0.0.1 --directory "$SRV" > "$SETUP/server.log" 2>&1 &
+          echo "SERVER_PID=$!" >> "$GITHUB_ENV"
+          sleep 2
+      - name: Snapshot, install N silently, the settings written
+        run: |
+          mkdir -p "$SNAP" "$W" "$(dirname "$SETTINGS")"
+          python -I scripts/e7-residue.py snapshot "$SNAP/1-before.json"
+          "$SETUP/N-setup.exe" /S
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.1
+          printf '%s' '{"version":1,"update_check":true,"theme":"dark"}' > "$SETTINGS"
+          cp "$SETTINGS" "$W/settings.before.json"
+          sha256sum "$INST/lpk-gui.exe" | cut -d' ' -f1 > "$W/N-gui.sha256"
+      - name: The negative case - a payload whose signature does not match installs nothing
+        run: |
+          cp "$W.bad.json" "$SRV/releases/latest/download/latest.json"
+          rm -f "$STATE/update.json"
+          # R361: no WebView2 browser process of ours (its command line names our user data folder) may
+          # outlive a clean exit by 30 s; each one is listed with how long they took to go.
+          webview2_gone() {
+            local q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+            local t0=$SECONDS left="" seen=""
+            while :; do
+              left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
+              left="${left//$'\r'/}"
+              [ -n "$left" ] || break
+              [ -n "$seen" ] || { seen=1; echo "WebView2 processes of ours $1:"; echo "$left"; }
+              if [ $((SECONDS - t0)) -ge 30 ]; then
+                echo "WebView2 processes outlived a clean exit by 30 s:"; echo "$left"; return 1
+              fi
+              sleep 1
+            done
+            if [ -n "$seen" ]; then echo "they were gone after $((SECONDS - t0)) s"; else echo "no WebView2 process of ours $1"; fi
+          }
+          # R361: the hook closes the app itself after the outcome; it is waited for, never killed.
+          LPK_GUI_UPDATE_E2E="$W/bad.log" "$INST/lpk-gui.exe" &
+          gui=$!
+          for i in $(seq 1 120); do kill -0 "$gui" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$gui" 2>/dev/null; then
+            echo "--- hook log"; cat "$W/bad.log" || true
+            kill "$gui" || true; wait "$gui" || true
+            echo "the GUI did not close after the refused update"; exit 1
+          fi
+          guirc=0; wait "$gui" || guirc=$?
+          echo "the GUI closed by itself after ${i}s, exit code $guirc"
+          echo "--- hook log"; cat "$W/bad.log"; echo "--- server"; cat "$SETUP/server.log"
+          test "$guirc" = 0 || { echo "the GUI exited with $guirc after the refused update"; exit 1; }
+          grep -q "^closing after the outcome$" "$W/bad.log"
+          webview2_gone "after the GUI's exit"
+          grep -q "^step check found 0.0.2$" "$W/bad.log"
+          grep -q "^step download$" "$W/bad.log"
+          if grep -qE "^step (verified|quit|install)$" "$W/bad.log"; then echo "the flipped payload got past verification"; exit 1; fi
+          grep -q "^outcome Err" "$W/bad.log"
+          grep -q "could not be verified" "$W/bad.log"
+          test "$(sha256sum "$INST/lpk-gui.exe" | cut -d' ' -f1)" = "$(cat "$W/N-gui.sha256")"
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.1
+          echo "refused: nothing installed, N still in place"
+      - name: Diagnostics on - process creation and termination audited, with command lines (this runner only)
+        shell: pwsh
+        run: |
+          # Process Creation and Process Termination (4688, 4689: the exit status), by GUID (locale-proof).
+          auditpol /set /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable
+          auditpol /set /subcategory:"{0CCE922C-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable
+          $k = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
+          New-Item -Path $k -Force | Out-Null
+          Set-ItemProperty -Path $k -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
+          auditpol /get /subcategory:"{0CCE922B-69AE-11D9-BED3-505054503030}"
+          auditpol /get /subcategory:"{0CCE922C-69AE-11D9-BED3-505054503030}"
+          $global:LASTEXITCODE = 0
+      - name: N updates to N+1 - the hook presses Install and restart
+        run: |
+          state() {
+            echo "=== state: $1"
+            reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LitePack' /v DisplayVersion 2>&1 | grep -i DisplayVersion || echo "no DisplayVersion"
+            (cd "$INST" && sha256sum lpk-gui.exe bin/*.exe 2>&1 || true)
+            ls -la "$TMPW" | grep -iE 'updater|setup|installer|nsis|ns[a-z0-9]{3,}\.tmp' || echo "nothing updater-like in $TMPW"
+            for d in "$TMPW"/*-updater-*; do if [ -d "$d" ]; then ls -la "$d"; fi; done
+          }
+          TMPW="$(pwsh -NoProfile -Command '[IO.Path]::GetTempPath().TrimEnd([char]92)' | tr -d '\r')"
+          TMPW="$(cygpath -m "$TMPW")"
+          echo "temp folder: $TMPW"
+          n1gui="$(awk '{ sub(/^[*]/, "", $2) } $2 == "lpk-gui.exe" { print $1 }' "$SETUP/N1.sha256")"
+          test -n "$n1gui" || { echo "N1.sha256 has no lpk-gui.exe:"; cat "$SETUP/N1.sha256"; exit 1; }
+          state before
+          # R361: as in the negative case, no WebView2 process of ours left before N's GUI starts.
+          webview2_gone() {
+            local q='@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedgewebview2.exe" -and $_.CommandLine -like "*org.litepack.gui\WebView2*" }) | ForEach-Object { "pid {0} parent {1} started {2:o}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate }'
+            local t0=$SECONDS left="" seen=""
+            while :; do
+              left="$(pwsh -NoProfile -Command "$q")" || { echo "the WebView2 process query failed"; return 1; }
+              left="${left//$'\r'/}"
+              [ -n "$left" ] || break
+              [ -n "$seen" ] || { seen=1; echo "WebView2 processes of ours $1:"; echo "$left"; }
+              if [ $((SECONDS - t0)) -ge 30 ]; then
+                echo "WebView2 processes outlived a clean exit by 30 s:"; echo "$left"; return 1
+              fi
+              sleep 1
+            done
+            if [ -n "$seen" ]; then echo "they were gone after $((SECONDS - t0)) s"; else echo "no WebView2 process of ours $1"; fi
+          }
+          webview2_gone "before N's GUI starts"
+          since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          pwsh -NoProfile -File scripts/e7-e2e-watch.ps1 -Out "$W/watch.log" -Seconds 200 &
+          watch=$!
+          sleep 3
+          cp "$W.good.json" "$SRV/releases/latest/download/latest.json"
+          rm -f "$STATE/update.json"
+          LPK_GUI_UPDATE_E2E="$W/good.log" "$INST/lpk-gui.exe" &
+          gui=$!
+          for i in $(seq 1 180); do kill -0 "$gui" 2>/dev/null || break; sleep 1; done
+          echo "--- hook log"; cat "$W/good.log"
+          if kill -0 "$gui" 2>/dev/null; then echo "the GUI did not exit for the installer"; kill "$gui"; exit 1; fi
+          guirc=0; wait "$gui" || guirc=$?
+          echo "GUI gone by $(date -u +%H:%M:%S), exit code $guirc"
+          # Wait for N+1's lpk-gui.exe (as packed: the bundle-type token turned back, scripts/e7-bundled-hash.py);
+          # then for every process running from the plugin's download folder (<temp>/LitePack-0.0.2-updater-*/,
+          # where it writes the installer) to have ended.
+          for i in $(seq 1 300); do
+            got="$(python -I scripts/e7-bundled-hash.py "$INST/lpk-gui.exe" 2>/dev/null || true)"
+            [ "$got" = "$n1gui" ] && break
+            sleep 1
+          done
+          echo "after ${i}s: lpk-gui.exe $got (N+1 $n1gui)"
+          wait "$watch" || true
+          echo "--- process watch"; cat "$W/watch.log"
+          # R358: the GUI the installer's /R started is not armed (no hook log): let it settle before the audit
+          # events are taken. Up to 40 s while the newest lpk-gui.exe without arguments runs and crash.log gains
+          # no start note; it must then still run, with no crash note (checked below).
+          notes0=0
+          if [ -f "$STATE/crash.log" ]; then notes0="$(grep -c 'start failed' "$STATE/crash.log" || true)"; fi
+          newest=""
+          if [ "$got" = "$n1gui" ]; then
+            for i in $(seq 1 40); do
+              newest="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' } | Sort-Object CreationDate | Select-Object -Last 1 -ExpandProperty ProcessId)" | tr -d '\r')"
+              notes=0
+              if [ -f "$STATE/crash.log" ]; then notes="$(grep -c 'start failed' "$STATE/crash.log" || true)"; fi
+              [ -n "$newest" ] || { echo "settle: no lpk-gui.exe without arguments after ${i}s"; break; }
+              [ "$notes" = "$notes0" ] || { echo "settle: a new start note after ${i}s (GUI pid $newest)"; break; }
+              sleep 1
+            done
+            echo "settle: newest GUI pid '${newest}' after ${i}s"
+          fi
+          pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$since" > "$W/events.log"
+          echo "--- event logs"; cat "$W/events.log"
+          echo "--- server"; cat "$SETUP/server.log"
+          state "after the GUI-driven update"
+          if [ "$got" != "$n1gui" ]; then
+            # The control: the same downloaded installer, started by hand with the plugin's switches.
+            f="$(ls "$TMPW"/*-updater-*/*.exe 2>/dev/null | head -n 1 || true)"
+            if [ -n "$f" ]; then
+              cmp "$f" "$SETUP/N1-setup.exe" && echo "the downloaded installer is N+1's: $f"
+              control_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              rc=0; timeout 300 "$f" /P /UPDATE || rc=$?
+              echo "control: $f /P /UPDATE exited with $rc"
+              pwsh -NoProfile -File scripts/e7-e2e-events.ps1 -Since "$control_since"
+              state "after the control run"
+            else
+              echo "control: no downloaded installer under $TMPW/*-updater-*"
+            fi
+            echo "the GUI-driven update did not install N+1"
+            exit 1
+          fi
+          running=1
+          for i in $(seq 1 120); do
+            running="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process | Where-Object { \$_.ExecutablePath -like '*-updater-*' }).Count" | tr -d '\r')"
+            [ "$running" = 0 ] && break
+            sleep 1
+          done
+          echo "installer processes still running from the download folder: $running"
+          test "$running" = 0
+          # The installer really ran, started by the GUI with the plugin's switches, and exited with 0 (the
+          # audit's 4688 and 4689 for the file in the download folder).
+          grep -E ' 4688 .*-updater-[^\\]*\\[^|]*-installer\.exe .*Creator Process Name:[[:space:]]*[^|]*\\lpk-gui\.exe .*Process Command Line:.*-installer\.exe" /P /UPDATE( |$)' "$W/events.log" \
+            || { echo "no audit record of lpk-gui.exe starting the downloaded installer with /P /UPDATE"; exit 1; }
+          grep -E ' 4689 .*-updater-[^\\]*\\[^|]*-installer\.exe [|] Exit Status:[[:space:]]*0x0' "$W/events.log" \
+            || { echo "no audit record of the downloaded installer exiting with 0"; exit 1; }
+          # R342: the GUI the installer's /R started is N+1's and stays up (it once panicked in setup, exit 101).
+          # R348: a failed start exits 1 (or, without the smoke or e2e variable, waits in an alert), so a live
+          # lpk-gui.exe is not enough: every installed GUI's exit in the test's window (the audit's 4689, enabled
+          # above) has status 0, and the crash note holds no failed start and no failed hand-off.
+          echo "--- installed GUI exits (4689)"
+          grep -E ' 4689 .*[\]LitePack[\]lpk-gui\.exe [|] Exit Status' "$W/events.log" || echo "none"
+          if [ -f "$STATE/crash.log" ]; then echo "--- crash.log"; cat "$STATE/crash.log"; else echo "--- no crash.log"; fi
+          if grep -E ' 4689 .*[\]LitePack[\]lpk-gui\.exe [|] Exit Status' "$W/events.log" \
+            | grep -vE 'Exit Status:[[:space:]]*0x0+([^0-9a-fA-Fx]|$)'; then
+            echo "a LitePack GUI exited with a non-zero status after the update"; exit 1
+          fi
+          # R358: the WebView2 processes the old GUI started (its first 4688 here) and when they ended (4689).
+          echo "--- the old GUI's WebView2 processes (4688 and 4689)"
+          python -I -c "
+          import re, sys
+          lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+          def field(line, name):
+              m = re.search(r'(?:^|\| |\d )' + name + r':\s*(0x[0-9a-fA-F]+)', line)
+              return int(m.group(1), 16) if m else None
+          old = next((field(l, 'New Process ID') for l in lines
+                      if ' 4688 ' in l and re.search(r'New Process Name:[^|]*\\\\LitePack\\\\lpk-gui\.exe', l)), None)
+          if old is None:
+              print('no 4688 of the old GUI'); sys.exit(0)
+          ours = {old}
+          for l in lines:
+              if ' 4688 ' in l and 'msedgewebview2.exe' in l and field(l, 'Creator Process ID') in ours:
+                  ours.add(field(l, 'New Process ID')); print(l)
+          ours.discard(old)
+          for l in lines:
+              if ' 4689 ' in l and 'msedgewebview2.exe' in l and field(l, 'Process ID') in ours:
+                  print(l)
+          print('old GUI pid', hex(old), 'webview processes', sorted(hex(p) for p in ours))
+          " "$W/events.log"
+          # One grep that prints nothing (R358: a printing grep repeated the note cat showed above, which read
+          # as two notes for one failed start).
+          if [ -f "$STATE/crash.log" ] && grep -qE 'start failed|update hand-off failed' "$STATE/crash.log"; then
+            echo "the crash note records a failed start or a failed hand-off (crash.log above)"; exit 1
+          fi
+          if [ -n "$newest" ] && ! pwsh -NoProfile -Command "if (Get-Process -Id $newest -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"; then
+            echo "the GUI the installer restarted (pid $newest) did not stay up"; exit 1
+          fi
+          alive="$(pwsh -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='lpk-gui.exe'\" | Where-Object { \$_.CommandLine -notmatch '--' }).Count" | tr -d '\r')"
+          echo "LitePack GUIs running after the update: $alive"
+          test "$alive" -ge 1 || { echo "the GUI the installer restarted is not running"; exit 1; }
+          # R365: the plugin exits before removing its download; the restarted GUI's start removes it.
+          left=""
+          for d in "$TMPW"/LitePack-*-updater-*; do
+            if [ -d "$d" ]; then left=1; echo "still in the temp folder: $d"; ls -la "$d"; fi
+          done
+          if [ -n "$left" ]; then echo "the restarted GUI did not remove the update's download (R365)"; exit 1; fi
+          echo "no update download left in $TMPW"
+          # The installer's /R started N+1's GUI again: stop it (its own check is not due today).
+          pwsh -NoProfile -Command 'Get-Process lpk-gui -ErrorAction SilentlyContinue | Format-Table Id, Path; Get-Process lpk-gui -ErrorAction SilentlyContinue | Stop-Process -Force'
+          sleep 3
+          python -I -c "
+          import sys
+          want = ['step check found 0.0.2', 'step download', 'step verified', 'step quit', 'step install']
+          got = [l.strip() for l in open(sys.argv[1]) if l.startswith('step ')]
+          print('steps:', got)
+          sys.exit(0 if got == want else 'the hook log is not check, download, verify, quit, install in that order')
+          " "$W/good.log"
+      - name: N+1 installed, its binaries, the registration and Path, the settings kept
+        run: |
+          bad=0
+          while read -r sum name; do
+            name="${name#\*}"
+            if [ "$name" = lpk-gui.exe ]; then
+              # As packed: tauri-bundler patches the bundle type into the copy it packs (e7-bundled-hash.py).
+              got="$(python -I scripts/e7-bundled-hash.py "$INST/lpk-gui.exe" || true)"
+            else
+              got="$(sha256sum "$INST/bin/$name" 2>/dev/null | cut -d' ' -f1 || true)"
+            fi
+            echo "$name: installed $got, N+1 $sum"
+            [ "$got" = "$sum" ] || bad=1
+          done < "$SETUP/N1.sha256"
+          test "$bad" -eq 0 || { echo "a binary is not N+1's after the update"; exit 1; }
+          python -I scripts/e7-installer-check.py installed "$INST" 0.0.2
+          echo "settings: $(cat "$SETTINGS")"
+          cmp "$W/settings.before.json" "$SETTINGS"
+      - name: Uninstall silently, then the residue against the first snapshot
+        run: |
+          "$INST/uninstall.exe" /S
+          scripts/e7-wait-uninstaller.sh "$INST"
+          python -I scripts/e7-residue.py snapshot "$SNAP/2-after-uninstall.json"
+          python -I scripts/e7-residue.py diff "$SNAP/1-before.json" "$SNAP/2-after-uninstall.json" \
+            --allow-settings --allow-uninstaller-copy --run-folder "$INST"
+      - name: Stop the server and delete the key files
+        if: always()
+        run: |
+          [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null || true
+          rm -rf "$KEYS" "$SRV"
+          test ! -e "$KEYS" && echo "keys deleted"
+
+  # E7-5: the x64 installer on an ARM64 PC names the ARM64 build and exits before writing a file (PREINSTALL,
+  # ${IsNativeARM64}). Silent, so the message box takes its /SD default.
+  installer-arm64-refusal:
+    name: installer refuses on ARM64 (windows-11-arm)
+    needs: installer
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    runs-on: windows-11-arm
+    # Without these, Git's bash turns `/S` into a path (S:/), and the installer runs with its UI and waits
+    # (the job's first run hung until its timeout).
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: installer-x64
+          path: setup
+      - name: The x64 installer exits with an error and installs nothing
+        run: |
+          inst="$(cygpath -m "$LOCALAPPDATA")/LitePack"
+          test ! -e "$inst" || { echo "already present: $inst"; exit 1; }
+          rc=0; timeout 300 ./setup/N-setup.exe /S || rc=$?
+          test "$rc" -ne 124 || { echo "the installer did not exit in five minutes"; tasklist; exit 1; }
+          echo "x64 installer on ARM64: exit code $rc"
+          ls -la "$inst" 2>/dev/null && { echo "files were written to $inst"; exit 1; }
+          test "$rc" -ne 0
+          echo "refused on ARM64 with nothing installed"
 
   # E8's honesty rule: every bench/results directory the documents cite is in the tree.
   cited-results:

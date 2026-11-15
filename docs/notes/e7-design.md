@@ -323,6 +323,12 @@ before the owner publishes.
 and restart", "Later" and "Skip this version", and nothing installs without that click. Before installing, the GUI runs
 its quit path (E5 §1: ask while an operation runs, cancel, close the sessions); `install` then starts the installer with
 `/P /UPDATE` (`passive` [UPD-CFG]) and exits the process [UPD-SRC][T-UPD]; per user, no UAC.
+The plugin writes the verified installer to `<temp>\LitePack-<version>-updater-<6 random>\` and keeps that folder,
+and its exit skips the file's own clean-up, so every update leaves its download (R365, CI run 43676006117). The GUI's
+next start (installed copies) removes such folders up to its own version, retrying for half a minute while the
+installer may still hold its file, and the uninstaller removes any left; the residue check allows the Windows and
+WebView2 records the restarted GUI's longer run brings (WebView2's jump list, Direct3D's shader cache, Windows'
+privacy consent defaults, WAM's device ticket, the installer's MuiCache names).
 
 **Default and silence** (decision E5 (d), §10 Q4). On by default and switchable off; off means no request at all, the
 check never called. Portable: notify only. MSIX: compiled out by a cargo feature of `lpk-gui` that the Store build turns

@@ -145,6 +145,57 @@ if ! cmp "$work/LICENSE_MIT" notices/nsis/nsis_tauri_utils-LICENSE_MIT; then
   status=1
 fi
 
+# R272 (E7-5): the plugin's source archive at its tag (GitHub's tarball). Nothing reads it before its SHA-256 matches
+# the pin. Then only its Cargo.toml files and a Cargo.lock, if any, are unpacked (text: never a source file, never a
+# .cargo/ directory), selected by name from its member list, and every crate the DLL links is looked up in
+# THIRD-PARTY-NOTICES.
+fetch -o "$work/source.tar.gz" "$(pin_value nsis_tauri_utils archive)"
+got="$(sha256sum "$work/source.tar.gz" | cut -d' ' -f1)"
+echo "[nsis_tauri_utils] source archive at $tag: SHA-256 $got"
+if [[ "$got" != "$(pin_value nsis_tauri_utils archive_sha256)" ]]; then
+  echo "[nsis_tauri_utils] source archive SHA-256 $got differs from archive_sha256 in $pin; nothing read" >&2
+  status=1
+else
+  mapfile -t members < <(tar -tzf "$work/source.tar.gz" | grep -E '^[^/]+/([^/]+/)*Cargo\.(toml|lock)$' \
+    | grep -vE '(^|/)\.cargo/|(^|/)\.\.(/|$)' || true)
+  echo "[nsis_tauri_utils] its Cargo manifests and locks (${#members[@]}):"
+  printf '  %s\n' "${members[@]}"
+  if [[ "${#members[@]}" -eq 0 ]]; then
+    echo "[nsis_tauri_utils] no Cargo.toml in the source at $tag" >&2
+    exit 1
+  fi
+  mkdir "$work/src"
+  tar -xzf "$work/source.tar.gz" -C "$work/src" -- "${members[@]}"
+  lock="$(find "$work/src" -name Cargo.lock | sort | head -1)"
+  if [[ -z "$lock" ]]; then
+    # R325: the tag publishes no Cargo.lock (CI run 42486016300). Cargo resolves the workspace's graph for the
+    # DLL's target (the NSIS x86-unicode plugin: i686-pc-windows-msvc) from its manifests and crates.io's index;
+    # `cargo metadata` builds and runs nothing (no build script, no proc-macro). Cargo needs a target file to
+    # discover a library, so an empty src/lib.rs of ours stands beside each manifest (never the archive's code).
+    # It runs from this repository's root with --manifest-path into the extracted tree: cargo reads configuration
+    # from the current directory upwards, so no .cargo/config.toml of the archive (none is unpacked anyway) could
+    # set a rustc wrapper or a registry, and this repository's rust-toolchain.toml applies. Today's versions, not
+    # necessarily the DLL's: names and licences are what is checked.
+    while IFS= read -r manifest; do
+      mkdir -p "$(dirname "$manifest")/src"
+      : > "$(dirname "$manifest")/src/lib.rs"
+    done < <(find "$work/src" -name Cargo.toml)
+    root="$(find "$work/src" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    echo "[nsis_tauri_utils] no Cargo.lock at $tag: resolving its workspace with cargo metadata (today's versions)"
+    if cargo metadata --format-version 1 --filter-platform i686-pc-windows-msvc \
+        --manifest-path "$root/Cargo.toml" > "$work/metadata.json"; then
+      python3 -I scripts/nsis-lock-check.py --metadata "$work/metadata.json" THIRD-PARTY-NOTICES \
+        nsis_tauri_utils || status=1
+    else
+      echo "[nsis_tauri_utils] cargo metadata failed; the manifests' direct dependencies instead" >&2
+      python3 -I scripts/nsis-lock-check.py --manifests-only "$work/src" THIRD-PARTY-NOTICES || status=1
+      status=1
+    fi
+  else
+    python3 -I scripts/nsis-lock-check.py "$lock" THIRD-PARTY-NOTICES --manifests "$work/src" || status=1
+  fi
+fi
+
 if [[ "$status" -ne 0 ]]; then
   exit "$status"
 fi

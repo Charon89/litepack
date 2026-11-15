@@ -43,4 +43,7 @@ pub const COMMANDS: &[&str] = &[
     "about",
     "about_open",
     "remove_profile",
+    "update_install",
+    "update_skip",
+    "open_release_page",
 ];

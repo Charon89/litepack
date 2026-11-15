@@ -1,0 +1,22 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../../target/release/lpk.exe": "bin/lpk.exe",
+      "../../target/release/lpk-check.exe": "bin/lpk-check.exe",
+      "../../target/release/lpk-worker.exe": "bin/lpk-worker.exe",
+      "../../target/release/lpk-worker-libarchive.exe": "bin/lpk-worker-libarchive.exe",
+      "../../target/release/lpk_shell.dll": "shell/0.0.1/lpk_shell.dll",
+      "../../THIRD-PARTY-NOTICES": "THIRD-PARTY-NOTICES",
+      "../../LICENSE-APACHE": "LICENSE-APACHE",
+      "../../LICENSE-MIT": "LICENSE-MIT"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer.nsh"
+      }
+    }
+  }
+}

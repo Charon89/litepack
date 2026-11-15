@@ -27,11 +27,13 @@ use windows::Win32::Security::{
     TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{
-    FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdInfo,
+    FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdInfo,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ACCESS_RIGHTS,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_INFO,
     FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ,
@@ -256,12 +258,131 @@ fn file_id(h: &OwnedHandle) -> Result<FileId, FsError> {
     })
 }
 
-/// Delete what `h` is open on (opened with `DELETE`): POSIX semantics where the volume has
-/// them (the name goes at once), else the classic disposition (the name goes at the close).
+/// Add the attributes asked for (read-only, hidden, system) to what `file` is open on (with
+/// `FILE_WRITE_ATTRIBUTES`); the other attributes and the times are left as they are.
+pub fn add_attributes<H: AsRawHandle>(
+    file: &H,
+    read_only: bool,
+    hidden: bool,
+    system: bool,
+) -> Result<(), FsError> {
+    let mut add = 0;
+    if read_only {
+        add |= FILE_ATTRIBUTE_READONLY.0;
+    }
+    if hidden {
+        add |= FILE_ATTRIBUTE_HIDDEN.0;
+    }
+    if system {
+        add |= FILE_ATTRIBUTE_SYSTEM.0;
+    }
+    if add == 0 {
+        return Ok(());
+    }
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: `info` is a live, correctly sized output buffer for this class; `file` is open.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle()),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    if info.FileAttributes & add == add {
+        return Ok(());
+    }
+    let set = FILE_BASIC_INFO {
+        // Zero times: left unchanged.
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        // FILE_ATTRIBUTE_NORMAL is valid only alone; it goes when another attribute comes.
+        FileAttributes: (info.FileAttributes & !FILE_ATTRIBUTE_NORMAL.0) | add,
+    };
+    // SAFETY: `set` is a live, correctly sized input buffer for this class; `file` is open.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileBasicInfo,
+            (&raw const set).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    Ok(())
+}
+
+/// Clear the read-only attribute of what `h` is open on (with `FILE_WRITE_ATTRIBUTES`);
+/// `true` when it was set and is now cleared.
+fn clear_readonly(h: &OwnedHandle) -> Result<bool, FsError> {
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: `info` is a live, correctly sized output buffer for this class; `h` is open.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(h.as_raw_handle()),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    if info.FileAttributes & FILE_ATTRIBUTE_READONLY.0 == 0 {
+        return Ok(false);
+    }
+    let mut attrs = info.FileAttributes & !FILE_ATTRIBUTE_READONLY.0;
+    if attrs == 0 {
+        attrs = FILE_ATTRIBUTE_NORMAL.0;
+    }
+    let set = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: attrs,
+    };
+    // SAFETY: `set` is a live, correctly sized input buffer for this class; `h` is open.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(h.as_raw_handle()),
+            FileBasicInfo,
+            (&raw const set).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }?;
+    Ok(true)
+}
+
+/// Whether a refused POSIX disposition means the volume (FAT, exFAT) or the system has no
+/// POSIX delete, so the classic disposition is the fallback; any other refusal (access
+/// denied, a running image, a sharing violation) is the answer, and the file is left as it
+/// was.
+fn posix_delete_unsupported(e: &windows::core::Error) -> bool {
+    use windows::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+    };
+    [
+        ERROR_INVALID_PARAMETER,
+        ERROR_NOT_SUPPORTED,
+        ERROR_INVALID_FUNCTION,
+    ]
+    .iter()
+    .any(|c| e.code() == c.to_hresult())
+}
+
+/// Delete what `h` is open on (opened with `DELETE`, and `FILE_WRITE_ATTRIBUTES` where the
+/// file's ACL grants it), whoever made it read-only: every caller removes only what the
+/// extraction's policy decided to replace (`Existing::Replace`, an explicit choice) or a file
+/// this extraction created, so a read-only file goes as `unlink` takes one on Unix. POSIX
+/// semantics where the volume has them (the name goes at once; `IGNORE_READONLY_ATTRIBUTE`).
+/// Only where it has none ([`posix_delete_unsupported`]: FAT, exFAT) is the read-only
+/// attribute cleared through the handle and the classic disposition used (the name goes at
+/// the close); if that fails too, the attribute is put back (best effort).
 fn dispose(h: &OwnedHandle) -> Result<(), FsError> {
     let ex = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
-            FILE_DISPOSITION_FLAG_DELETE.0 | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0,
+            FILE_DISPOSITION_FLAG_DELETE.0
+                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
+                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
         ),
     };
     // SAFETY: `ex` is a live, correctly sized input buffer for this class; `h` is open.
@@ -273,19 +394,30 @@ fn dispose(h: &OwnedHandle) -> Result<(), FsError> {
             std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
         )
     };
-    if r.is_ok() {
-        return Ok(());
+    match r {
+        Ok(()) => return Ok(()),
+        Err(e) if !posix_delete_unsupported(&e) => return Err(e.into()),
+        Err(_) => {}
     }
+    // The classic disposition refuses a read-only file: clear the attribute first (best
+    // effort; the disposition reports what still fails).
+    let cleared = clear_readonly(h).unwrap_or(false);
     let classic = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: `classic` is a live, correctly sized input buffer for this class; `h` is open.
-    unsafe {
+    let r = unsafe {
         SetFileInformationByHandle(
             HANDLE(h.as_raw_handle()),
             FileDispositionInfo,
             (&raw const classic).cast(),
             std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
-    }?;
+    };
+    if let Err(e) = r {
+        if cleared {
+            let _ = add_attributes(h, true, false, false);
+        }
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -392,19 +524,54 @@ impl Dir {
         Ok(File::from(h))
     }
 
+    /// Open the child directory `name` to change its attributes and times (no more access
+    /// than that, no `DELETE`), when it is still the directory `id`; a name-surrogate
+    /// reparse point there is [`FsError::Linked`]. The handle is a [`File`], so the times are
+    /// set with `File::set_modified`.
+    pub fn open_dir_attributes(&self, name: &OsStr, id: FileId) -> Result<File, FsError> {
+        let w = component(name)?;
+        let h = nt_create(
+            &self.h,
+            &w,
+            FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_ALL,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+        )?;
+        let (attrs, tag) = tag_info(&h)?;
+        if is_name_surrogate(attrs, tag) {
+            return Err(FsError::Linked);
+        }
+        if file_id(&h)? != id {
+            return Err(FsError::Changed);
+        }
+        Ok(File::from(h))
+    }
+
     /// Remove what is at `name` in this directory, never following it: with `Some(id)`, only
     /// when it is still the file `id`; with `None`, a file or a link (a directory link or a
     /// junction removed as the link), while a real directory is an `AlreadyExists` error.
     pub fn remove(&self, name: &OsStr, id: Option<FileId>) -> Result<(), FsError> {
         let w = component(name)?;
-        let h = nt_create(
-            &self.h,
-            &w,
-            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            FILE_SHARE_ALL,
-            FILE_OPEN,
-            NTCREATEFILE_CREATE_OPTIONS(0),
-        )?;
+        let open = |access| {
+            nt_create(
+                &self.h,
+                &w,
+                access,
+                FILE_SHARE_ALL,
+                FILE_OPEN,
+                NTCREATEFILE_CREATE_OPTIONS(0),
+            )
+        };
+        // `FILE_WRITE_ATTRIBUTES` serves only the read-only fallback of `dispose` (volumes
+        // without POSIX delete); a file whose own ACL denies it may still be deletable through
+        // its folder's delete-child right, so it is opened without it then.
+        let h = match open(DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE) {
+            Err(FsError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
+                open(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)?
+            }
+            r => r?,
+        };
         let (attrs, tag) = tag_info(&h)?;
         match id {
             Some(id) if file_id(&h)? != id => return Err(FsError::Changed),
@@ -791,6 +958,68 @@ mod tests {
         drop(sub);
         drop(root);
         std::fs::rename(d.path().join("sub"), d.path().join("moved")).unwrap();
+    }
+
+    /// Only a volume or system without POSIX delete takes the classic fallback (which clears
+    /// the read-only attribute first); every other refusal is returned as it is, the file's
+    /// attributes untouched.
+    #[test]
+    fn only_a_missing_posix_delete_takes_the_read_only_fallback() {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+            ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION, ERROR_WRITE_PROTECT,
+        };
+        let err = |c: windows::Win32::Foundation::WIN32_ERROR| {
+            windows::core::Error::from_hresult(c.to_hresult())
+        };
+        for c in [
+            ERROR_INVALID_PARAMETER,
+            ERROR_NOT_SUPPORTED,
+            ERROR_INVALID_FUNCTION,
+        ] {
+            assert!(posix_delete_unsupported(&err(c)), "{c:?}");
+        }
+        for c in [
+            ERROR_ACCESS_DENIED,
+            ERROR_SHARING_VIOLATION,
+            ERROR_WRITE_PROTECT,
+        ] {
+            assert!(!posix_delete_unsupported(&err(c)), "{c:?}");
+        }
+    }
+
+    /// A file whose own ACL denies `FILE_WRITE_ATTRIBUTES` is still removed through the
+    /// folder's delete-child right (the open retries without that right).
+    #[test]
+    fn a_file_denying_write_attributes_is_still_removed() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("locked.txt");
+        std::fs::write(&p, b"x").unwrap();
+        // Everyone (S-1-1-0): deny "write attributes".
+        let st = std::process::Command::new("icacls")
+            .arg(&p)
+            .args(["/deny", "*S-1-1-0:(WA)"])
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "{st:?}");
+        let root = Dir::open_path(d.path()).unwrap();
+        // The deny is in force: the first open of `remove` would be refused.
+        let w = component(OsStr::new("locked.txt")).unwrap();
+        let e = nt_create(
+            &root.h,
+            &w,
+            DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_ALL,
+            FILE_OPEN,
+            NTCREATEFILE_CREATE_OPTIONS(0),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, FsError::Io(e) if e.kind() == io::ErrorKind::PermissionDenied),
+            "{e:?}"
+        );
+        root.remove(OsStr::new("locked.txt"), None).unwrap();
+        assert!(std::fs::symlink_metadata(&p).is_err());
     }
 
     #[test]
