@@ -27,10 +27,12 @@ classified, and anything that fits no class fails:
   of the NSIS installation the bundler used (this script's `nsis-parts` command). Anything else under `$PLUGINSDIR`
   fits no class.
 - `nsis-uninstaller`: the uninstaller NSIS writes at install time (WriteUninstaller), which 7-Zip shows as a file
-  `uninstall.exe` at the installer's root and rebuilds from the installer's own stub: machine 0x14C, at most one per
-  installer, beginning with this installer's stub (its bytes [0, S), S the offset of the installer's first header,
-  the first 512-byte boundary holding the flags and then `EF BE AD DE` `NullsoftInst`), and carrying its own
-  first-header magic right after it. Both results are printed.
+  `uninstall.exe` at the installer's root and rebuilds from the installer's own stub: machine 0x14C, exactly one per
+  installer. S is the offset of the installer's first header (the first 512-byte boundary holding the flags and then
+  `EF BE AD DE` `NullsoftInst`), at least 0x200, and the installer's [0, S) must be an MZ PE. The uninstaller carries
+  its own first header at S with FH_FLAGS_UNINSTALL (1) set in its flags (clear in the installer's), the installer's
+  section table, and the installer's bytes [0, S) everywhere but inside `.rsrc` (its icon) and the PE CheckSum field
+  (R391). Both flags words and each differing byte range, with its section, are printed.
 It prints each PE with its class, machine and SHA-256, a count per class, and 7-Zip's full listing of each installer
 once.
 
@@ -88,6 +90,8 @@ PLUGINSDIR = "$PLUGINSDIR/"
 UNINSTALLER = ("uninstall.exe", "$instdir/uninstall.exe")
 # NSIS's first header: int flags, then int siginfo 0xDEADBEEF (little-endian) and "NullsoftInst".
 NSIS_MAGIC = b"\xef\xbe\xad\xdeNullsoftInst"
+# The first header's flag of an uninstaller (NSIS's fileform.h).
+FH_FLAGS_UNINSTALL = 1
 
 INSTALLER_RE = re.compile(r"^.+_(?P<arch>x64|arm64)-setup\.exe$")
 ZIP_RE = re.compile(r"^.+-windows-(?P<arch>x64|arm64)-(?P<kind>portable|cli)\.zip$")
@@ -210,7 +214,8 @@ def unpack(path, arch, kind, dest, sevenzip=None, through_7z=None):
             for n, info in enumerate(i for i in z.infolist() if not i.is_dir()):
                 rel = info.filename.replace("\\", "/")
                 a.listed.append(rel)
-                f = dest / f"{n:05d}" / (PurePosixPath(rel).name or "unnamed")
+                # A fixed name of its own: never a path built from the member's name (`C:evil`, `../x`).
+                f = dest / f"{n:05d}" / "member"
                 f.parent.mkdir()
                 f.write_bytes(z.read(info))
                 a.files.append((rel, f))
@@ -235,6 +240,8 @@ def notices(artefacts, repo):
                 errors.append(f"{a.name}: no {n}")
             elif count > 1:
                 errors.append(f"{a.name}: {n} {count} times ({', '.join(rel for rel, _ in hits)})")
+            elif not hits:
+                errors.append(f"{a.name}: {n} is listed but no unpacked file matches it")
             elif hits[0][0] != top_of(a, n):
                 errors.append(f"{a.name}: {n} is at {hits[0][0]}, not at the top ({top_of(a, n)})")
             elif hits[0][1].read_bytes() != want[n]:
@@ -311,24 +318,120 @@ def nsis_first_header(data):
     return None
 
 
+def u16(data, off):
+    return int.from_bytes(data[off : off + 2], "little")
+
+
+def u32(data, off):
+    return int.from_bytes(data[off : off + 4], "little")
+
+
+def pe_layout(data):
+    """(CheckSum offset, [(name, VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData)]) of the PE image at
+    the start of `data`. Raises Fail when it is not one."""
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise Fail("no MZ header")
+    pe = u32(data, 0x3C)
+    if pe + 24 > len(data) or data[pe : pe + 4] != b"PE\0\0":
+        raise Fail(f"no PE signature at {pe:#x}")
+    count, opt_size = u16(data, pe + 6), u16(data, pe + 20)
+    if opt_size < 68:
+        raise Fail(f"an optional header of {opt_size} bytes, too short for its CheckSum")
+    table = pe + 24 + opt_size
+    if table + 40 * count > len(data):
+        raise Fail("the section table runs past the stub")
+    secs = []
+    for i in range(count):
+        e = table + 40 * i
+        name = data[e : e + 8].rstrip(b"\0").decode("ascii", "replace")
+        secs.append((name, u32(data, e + 8), u32(data, e + 12), u32(data, e + 16), u32(data, e + 20)))
+    return pe + 24 + 64, secs
+
+
+class Stub:
+    """An NSIS installer's stub: S (its first header's offset), the bytes [0, S), its flags word and PE layout."""
+
+    def __init__(self, data):
+        s = nsis_first_header(data)
+        if s is None:
+            raise Fail("no NSIS first header on a 512-byte boundary")
+        if s < 0x200:
+            raise Fail(f"its first header is at {s:#x}, below 0x200")
+        self.s, self.bytes, self.flags = s, data[:s], u32(data, s)
+        try:
+            self.checksum, self.sections = pe_layout(self.bytes)
+        except Fail as e:
+            raise Fail(f"its stub [0, {s:#x}) is not a PE: {e}")
+
+    def where(self, off):
+        """The part of the stub holding offset `off`."""
+        if self.checksum <= off < self.checksum + 4:
+            return "CheckSum"
+        for name, _, _, size, ptr in self.sections:
+            if ptr <= off < ptr + size:
+                return name
+        first = min((ptr for *_, size, ptr in self.sections if size), default=self.s)
+        return "headers" if off < first else "outside any section"
+
+
+def differing_ranges(a, b):
+    """[(start, end)] of the runs where a and b (of one length) differ."""
+    runs, start = [], None
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y and start is None:
+            start = i
+        elif x == y and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(a)))
+    return runs
+
+
 def uninstaller_check(data, stub):
-    """(notes, problems) of the uninstaller's bytes against the installer's stub [0, S)."""
-    s = len(stub)
-    same = data[:s] == stub
+    """(notes, problems) of an uninstaller's bytes against its installer's Stub: its own first header at the same S
+    with NSIS's FH_FLAGS_UNINSTALL set (clear in the installer's), the same section table, and [0, S) equal to the
+    installer's apart from .rsrc and the CheckSum field."""
+    s = stub.s
+    notes, problems = [], []
     magic = data[s + 4 : s + 4 + len(NSIS_MAGIC)] == NSIS_MAGIC
-    notes = [f"begins with this installer's stub [0, {s:#x}): {'yes' if same else 'no'}",
-             f"its own first-header magic at {s:#x}: {'yes' if magic else 'no'}"]
-    problems = []
-    if not same:
-        problems.append(f"does not begin with this installer's stub [0, {s:#x})")
+    notes.append(f"its own first-header magic at {s:#x}: {'yes' if magic else 'no'}")
     if not magic:
-        problems.append(f"no first-header magic right after the stub (at {s:#x})")
+        problems.append(f"no first-header magic at {s:#x}, where the installer's first header is")
+    flags = u32(data, s) if len(data) >= s + 4 else None
+    notes.append(f"flags: the installer's {stub.flags:#010x}, the uninstaller's "
+                 + (f"{flags:#010x}" if flags is not None else "none"))
+    if stub.flags & FH_FLAGS_UNINSTALL:
+        problems.append("the installer's own flags carry FH_FLAGS_UNINSTALL")
+    if flags is None or not flags & FH_FLAGS_UNINSTALL:
+        problems.append("its flags do not carry FH_FLAGS_UNINSTALL")
+    head = data[:s]
+    try:
+        _, sections = pe_layout(head)
+    except Fail as e:
+        problems.append(f"its [0, {s:#x}) is not a PE: {e}")
+        return notes, problems
+    if sections != stub.sections:
+        problems.append(f"its section table differs from the installer's ({sections} against {stub.sections})")
+        return notes, problems
+    if len(head) < s:
+        problems.append(f"shorter than the installer's stub ({len(head):#x} bytes, not {s:#x})")
+        return notes, problems
+    outside = []
+    for start, end in differing_ranges(head, stub.bytes):
+        parts = sorted({stub.where(o) for o in range(start, end)})
+        notes.append(f"differs from the installer's stub at [{start:#x}, {end:#x}) in {', '.join(parts)}")
+        outside += [p for p in parts if p not in (".rsrc", "CheckSum")]
+    notes.append(f"[0, {s:#x}) equal to the installer's stub apart from .rsrc and CheckSum: "
+                 + ("no" if outside else "yes"))
+    if outside:
+        problems.append(f"differs from the installer's stub outside .rsrc and CheckSum ({', '.join(sorted(set(outside)))})")
     return notes, problems
 
 
 def classify(rel, path, arch, kind, unsigned, nsis_parts=None, stub=None):
     """(class, machine, sha256, problems, notes) of the PE at `path`, listed as `rel` in an artefact of `arch` and
-    `kind`; `nsis_parts` from read_nsis_parts and `stub` the installer's bytes [0, S) for an installer."""
+    `kind`; `nsis_parts` from read_nsis_parts and `stub` the installer's Stub for an installer."""
     data = Path(path).read_bytes()
     h = sha256_bytes(data)
     m = pesec.machine(path)
@@ -361,7 +464,7 @@ def classify(rel, path, arch, kind, unsigned, nsis_parts=None, stub=None):
         if m != X86:
             problems.append(f"machine {m:#06x}, not {X86:#06x}")
         if stub is None:
-            problems.append("the installer has no NSIS first header to compare with")
+            problems.append("the installer has no usable NSIS stub to compare with")
         else:
             notes, more = uninstaller_check(data, stub)
             problems += more
@@ -369,13 +472,6 @@ def classify(rel, path, arch, kind, unsigned, nsis_parts=None, stub=None):
         cls = "unclassified"
         problems.append("fits no class")
     return cls, m, h, problems, notes
-
-
-def installer_stub(path):
-    """The installer's bytes [0, S); None without a first header."""
-    data = Path(path).read_bytes()
-    s = nsis_first_header(data)
-    return None if s is None else data[:s]
 
 
 def pes(artefacts, unsigned, nsis_parts=None):
@@ -388,8 +484,12 @@ def pes(artefacts, unsigned, nsis_parts=None):
             lines.append(f"--- end of {a.name} ---")
         stub = None
         if a.kind == "installer":
-            stub = installer_stub(a.path) if a.path.is_file() else None
-            lines.append(f"{a.name}: first header at " + (f"{len(stub):#x}" if stub is not None else "none"))
+            try:
+                stub = Stub(a.path.read_bytes())
+                lines.append(f"{a.name}: first header at {stub.s:#x}, flags {stub.flags:#010x}, stub sections "
+                             + ", ".join(f"{n} [{p:#x}, {p + z:#x})" for n, _, _, z, p in stub.sections))
+            except (Fail, OSError) as e:
+                errors.append(f"{a.name}: {e}")
         per, seen, plugins = Counter(), Counter(), Counter()
         for rel, f in a.files:
             if not is_pe(f):
@@ -411,8 +511,8 @@ def pes(artefacts, unsigned, nsis_parts=None):
             if seen[n] != 1:
                 errors.append(f"{a.name}: {n} {seen[n]} times, expected once")
         errors += [f"{a.name}: $PLUGINSDIR's {n} {c} times" for n, c in sorted(plugins.items()) if c > 1]
-        if per["nsis-uninstaller"] > 1:
-            errors.append(f"{a.name}: {per['nsis-uninstaller']} uninstallers")
+        if a.kind == "installer" and per["nsis-uninstaller"] != 1:
+            errors.append(f"{a.name}: {per['nsis-uninstaller']} uninstallers, expected exactly one")
         lines.append(f"{a.name}: " + ", ".join(f"{c} {per[c]}" for c in sorted(per)) if per else f"{a.name}: no PE")
         total += per
     lines.append("all artefacts: " + ", ".join(f"{c} {total[c]}" for c in sorted(total)))
@@ -589,6 +689,15 @@ def self_test(sevenzip=None):
                 "lpk-worker.exe 0 times")
         planted("pe-nsis-in-zip", cli, lambda ms: ms + [("$PLUGINSDIR/System.dll", pesec.fake_pe([".text"], arch=X86))],
                 p_check, "$PLUGINSDIR/System.dll: fits no class")
+        # A member named like a drive or a parent path is written to a fixed name inside the work folder.
+        folder = zips("odd-names")
+        rewrite(folder / cli, lambda ms: ms + [("C:evil", b"x"), ("../outside", b"y"), ("LitePack/C:evil2", b"z")])
+        work = d / "work" / "odd"
+        odd = unpack(folder / cli, "x64", "cli", work)
+        ok("zip members go to fixed names inside the work folder", all(
+            q.name == "member" and q.resolve().is_relative_to(work.resolve()) for _, q in odd.files)
+           and {"C:evil", "../outside", "LitePack/C:evil2"} <= set(odd.listed)
+           and not (d / "outside").exists() and not (d / "work" / "outside").exists())
         # An MZ file without a PE header is no PE (a README that happens to start with MZ, say).
         folder = zips("not-a-pe")
         rewrite(folder / cli, lambda ms: ms + [("LitePack/MZ.txt", b"MZ" + bytes(200))])
@@ -623,18 +732,55 @@ def self_test(sevenzip=None):
         parts = read_nsis_parts(d / "nsis-parts.sha256")
         ok("nsis-parts: both System.dll kept", len(parts["system.dll"]) == 2)
 
-        # A synthetic installer: an x86 stub padded to 0x400 (an unaligned magic inside it), then its first header.
-        stub = bytearray(pesec.fake_pe([".text"], arch=X86).ljust(0x400, b"\0"))
-        stub[0x2C0 : 0x2C0 + len(NSIS_MAGIC)] = NSIS_MAGIC
-        stub = bytes(stub)
+        # A synthetic installer: an x86 stub of 0x400 bytes with a .text [0x200, 0x300) and a .rsrc [0x300, 0x400)
+        # (an unaligned magic inside its .text), then its first header with the flags clear.
+        def make_stub(rsrc_size=0x100):
+            pe, opt = 0x80, 240
+            head = bytearray(0x400)
+            head[:2] = b"MZ"
+            head[0x3C:0x40] = pe.to_bytes(4, "little")
+            head[pe : pe + 4] = b"PE\0\0"
+            head[pe + 4 : pe + 24] = (X86.to_bytes(2, "little") + (2).to_bytes(2, "little") + bytes(12)
+                                      + opt.to_bytes(2, "little") + (0x102).to_bytes(2, "little"))
+            table = pe + 24 + opt
+            for i, (name, ptr, size) in enumerate([(".text", 0x200, 0x100), (".rsrc", 0x300, rsrc_size)]):
+                e = table + 40 * i
+                head[e : e + 8] = name.encode().ljust(8, b"\0")
+                head[e + 8 : e + 24] = b"".join(v.to_bytes(4, "little") for v in (size, 0x1000 * (i + 1), size, ptr))
+            head[0x200:0x300] = bytes(range(256))
+            head[0x2C0 : 0x2C0 + len(NSIS_MAGIC)] = NSIS_MAGIC
+            head[0x300:0x400] = b"icon" * 64
+            return bytes(head)
+
+        def patch(data, off, new):
+            return data[:off] + new + data[off + len(new):]
+
+        stub = make_stub()
         setup_bytes = stub + b"\0\0\0\0" + NSIS_MAGIC + b"installer data"
         ok("the first header: the first 512-byte boundary with the magic", nsis_first_header(setup_bytes) == 0x400)
         ok("no first header: None", nsis_first_header(stub[:0x2C0]) is None)
+        the_stub = Stub(setup_bytes)
+        ok("the installer's stub: S, flags, sections", (the_stub.s, the_stub.flags, [s[0] for s in the_stub.sections])
+           == (0x400, 0, [".text", ".rsrc"]))
         uninst = stub + b"\x03\0\0\0" + NSIS_MAGIC + b"uninstaller data"
+        checksum = the_stub.checksum
 
-        def cls(rel, data, kind="installer", arch="x64", s=stub):
+        def cls(rel, data, kind="installer", arch="x64", s=the_stub):
             f.write_bytes(data)
             return classify(rel, f, arch, kind, unsigned, parts, s)
+
+        def stub_fails(label, make, contains):
+            try:
+                Stub(make)
+                ok(label, False)
+            except Fail as e:
+                ok(label, contains in str(e))
+
+        stub_fails("an installer whose first header is below 0x200 fails", b"\0\0\0\0" + NSIS_MAGIC + bytes(0x400),
+                   "below 0x200")
+        stub_fails("an installer whose stub is not MZ fails", b"ZM" + stub[2:] + b"\0\0\0\0" + NSIS_MAGIC,
+                   "not a PE: no MZ header")
+        stub_fails("an installer without a first header fails", stub, "no NSIS first header")
 
         ok("installer: a listed $PLUGINSDIR x86 DLL is an nsis-plugin",
            cls("$PLUGINSDIR/nsDialogs.dll", dialogs)[::3] == ("nsis-plugin", []))
@@ -650,13 +796,37 @@ def self_test(sevenzip=None):
            classify("$PLUGINSDIR/System.dll", f, "x64", "installer", unsigned)[0] == "unclassified")
         ok("installer: this installer's uninstaller is the nsis-uninstaller", cls("uninstall.exe", uninst)[::3] ==
            ("nsis-uninstaller", []))
-        ok("installer: the uninstaller's two results are printed", cls("uninstall.exe", uninst)[4] == [
-            "begins with this installer's stub [0, 0x400): yes", "its own first-header magic at 0x400: yes"])
-        other_stub = stub[:0x100] + bytes([stub[0x100] ^ 1]) + stub[0x101:]
-        ok("installer: an uninstaller of another stub fails", cls("uninstall.exe", other_stub + uninst[0x400:])[3] ==
-           ["does not begin with this installer's stub [0, 0x400)"])
-        ok("installer: an uninstaller without its own header fails", cls("uninstall.exe", stub + bytes(64))[3] ==
-           ["no first-header magic right after the stub (at 0x400)"])
+        ok("installer: the uninstaller's results are printed", cls("uninstall.exe", uninst)[4] == [
+            "its own first-header magic at 0x400: yes", "flags: the installer's 0x00000000, the uninstaller's 0x00000003",
+            "[0, 0x400) equal to the installer's stub apart from .rsrc and CheckSum: yes"])
+        # R391: the icon patched into .rsrc, and the CheckSum, may differ; anything else may not.
+        icon = patch(uninst, 0x310, b"ICON")
+        r = cls("uninstall.exe", icon)
+        ok("installer: a difference inside .rsrc passes", r[3] == [] and
+           "differs from the installer's stub at [0x310, 0x314) in .rsrc" in r[4])
+        r = cls("uninstall.exe", patch(icon, checksum, b"\x12\x34\x56\x78"))
+        ok("installer: a different CheckSum passes", r[3] == [] and
+           f"differs from the installer's stub at [{checksum:#x}, {checksum + 4:#x}) in CheckSum" in r[4])
+        r = cls("uninstall.exe", patch(uninst, 0x250, b"\xff"))
+        ok("installer: a difference in .text fails", r[3] == [
+            "differs from the installer's stub outside .rsrc and CheckSum (.text)"] and
+           "differs from the installer's stub at [0x250, 0x251) in .text" in r[4])
+        r = cls("uninstall.exe", patch(uninst, 0x100, b"\x01"))
+        ok("installer: a difference in the headers fails", r[3] == [
+            "differs from the installer's stub outside .rsrc and CheckSum (headers)"])
+        r = cls("uninstall.exe", make_stub(rsrc_size=0xF0) + uninst[0x400:])
+        ok("installer: a different section table fails", len(r[3]) == 1 and "section table differs" in r[3][0])
+        r = cls("uninstall.exe", setup_bytes)
+        ok("installer: the installer copied as its own uninstaller fails (flags)", r[3] == [
+            "its flags do not carry FH_FLAGS_UNINSTALL"])
+        r = cls("uninstall.exe", stub + bytes(64))
+        ok("installer: an uninstaller without its own header fails", "no first-header magic at 0x400, where the "
+           "installer's first header is" in r[3])
+        r = cls("uninstall.exe", uninst, s=Stub(stub + b"\x01\0\0\0" + NSIS_MAGIC))
+        ok("installer: an installer whose own flags say uninstaller fails",
+           "the installer's own flags carry FH_FLAGS_UNINSTALL" in r[3])
+        ok("installer: no installer stub fails the uninstaller", cls("uninstall.exe", uninst, s=None)[3] == [
+            "the installer has no usable NSIS stub to compare with"])
         ok("installer: $INSTDIR/Uninstall.exe is the nsis-uninstaller", cls("$INSTDIR/Uninstall.exe", uninst)[0] ==
            "nsis-uninstaller")
         ok("installer: an x64 uninstall.exe fails", "machine 0x8664, not 0x014c" in cls("uninstall.exe", helper)[3])
@@ -671,7 +841,7 @@ def self_test(sevenzip=None):
         setup = d / "LitePack_0.1.0_x64-setup.exe"
         setup.write_bytes(setup_bytes)
 
-        def installer(extra, tag):
+        def installer(extra, tag, uninstaller=True):
             a = Artefact(setup, "x64", "installer")
             root = d / "work" / f"inst-{tag}"
             members = [("lpk-gui.exe", "lpk-gui.exe")] + [(f"bin/{n}", n) for n in CLI_EXES]
@@ -679,8 +849,8 @@ def self_test(sevenzip=None):
             for rel, n in members:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_bytes((bins["x64"] / n).read_bytes())
-            for rel, data in [("$PLUGINSDIR/System.dll", plugin), ("$PLUGINSDIR/nsDialogs.dll", dialogs),
-                              ("uninstall.exe", uninst)] + extra:
+            for rel, data in [("$PLUGINSDIR/System.dll", plugin), ("$PLUGINSDIR/nsDialogs.dll", dialogs)] + (
+                    [("uninstall.exe", uninst)] if uninstaller else []) + extra:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_bytes(data)
             a.files = [(q.relative_to(root).as_posix(), q) for q in sorted(root.rglob("*")) if q.is_file()]
@@ -692,9 +862,20 @@ def self_test(sevenzip=None):
         ok("installer: six shipped, two plugins, one uninstaller", errors == [] and lines[-1] ==
            "all artefacts: nsis-plugin 2, nsis-uninstaller 1, shipped 6")
         ok("installer: the listing and the first header are printed", "a listing" in lines and
-           f"{setup.name}: first header at 0x400" in lines)
+           any(l.startswith(f"{setup.name}: first header at 0x400") for l in lines))
         errors = pes([installer([("$INSTDIR/uninstall.exe", uninst)], "two-uninst")], unsigned, parts)[1]
-        ok("installer: two uninstallers fail", any("2 uninstallers" in e for e in errors))
+        ok("installer: two uninstallers fail", any("2 uninstallers, expected exactly one" in e for e in errors))
+        errors = pes([installer([], "no-uninst", uninstaller=False)], unsigned, parts)[1]
+        ok("installer: no uninstaller fails", any("0 uninstallers, expected exactly one" in e for e in errors))
+        lines = pes([installer([], "good-2")], unsigned, parts)[0]
+        ok("installer: the stub's facts are printed", any(l.startswith(f"{setup.name}: first header at 0x400, flags "
+                                                               "0x00000000, stub sections .text [0x200, 0x300), .rsrc")
+                                                          for l in lines))
+        # b: a notice 7-Zip lists once that no unpacked file matches: a named failure, no IndexError.
+        lost = installer([], "lost")
+        lost.listed.append("LICENSE-MIT")
+        ok("notices: listed but not unpacked fails by name", any("LICENSE-MIT is listed but no unpacked file matches"
+                                                                 in e for e in notices([lost], repo)[1]))
         errors = pes([installer([("$PLUGINSDIR/SYSTEM.dll_1", plugin)], "renamed")], unsigned, parts)[1]
         ok("installer: a duplicate renamed by 7-Zip fits no class", any("SYSTEM.dll_1: fits no class" in e
                                                                          for e in errors))

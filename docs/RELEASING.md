@@ -356,10 +356,13 @@ credential, no OIDC token and no cache. Every action is pinned by its 40-hex com
   carries `.dep-v0` and is byte-equal to the build's, each name the artefact should hold exactly once. An
   `nsis-plugin` is an x86 (0x14C) PE directly under `$PLUGINSDIR` in an installer, each name at most once, byte-equal
   to a file of that name in `nsis-parts.sha256`. The `nsis-uninstaller` is the `uninstall.exe` NSIS writes at install
-  time (x86, at the installer's root, at most one), which must begin with this installer's own stub (its bytes up to
-  its first header, the first 512-byte boundary with NSIS's `EF BE AD DE` `NullsoftInst`) and carry its own
-  first-header magic right after it. Anything else fails. It prints each PE with its class, machine and SHA-256, both
-  uninstaller results, a count per class, and 7-Zip's full listing of each installer. The job uploads
+  time (x86, at the installer's root, exactly one), which 7-Zip rebuilds from this installer's own stub, its bytes
+  `[0, S)` up to its first header (S the first 512-byte boundary with NSIS's `EF BE AD DE` `NullsoftInst`, at least
+  0x200, the stub an MZ PE). It must carry its own first header at the same S with NSIS's `FH_FLAGS_UNINSTALL` bit set
+  (clear in the installer's), have the installer's section table, and equal the installer's `[0, S)` everywhere but
+  inside `.rsrc` (the uninstaller's icon is patched in there; R391) and the PE `CheckSum` field. Anything else fails.
+  It prints each PE with its class, machine and SHA-256, both flags words and each differing byte range with its
+  section, a count per class, and 7-Zip's full listing of each installer. The job uploads
   `release-assets` (the six assets and `SHA256SUMS`, kept 14 days) and outputs the SHA-256 of `SHA256SUMS`.
 - `smoke-x64` (windows-2025) and `smoke-arm64` (windows-11-arm): `SHA256SUMS` checked against `assemble`'s output,
   then `sha256sum -c`. The CLI and portable zips of the runner's architecture are unzipped with Windows' own
@@ -390,7 +393,12 @@ steps of part 1 add the rest: part 1d the SBOMs (E8-6's half: one CycloneDX SBOM
 asset, `litepack-<v>-sbom.zip`), and part 1e the install checks on both architectures (a silent install of each
 architecture's installer, its layout and notices, the GUI and `bin\lpk.exe` on a `.lpk` and a `.zip`, a silent
 uninstall and the residue diff). Part 2 then signs the PEs and both installers, and `assemble` checks the
-artefacts against the signed files instead (`docs/notes/e7-design.md` section 1).
+artefacts against the signed files instead (`docs/notes/e7-design.md` section 1). Signing also changes the bytes of
+the NSIS parts inside each installer: when it can sign, tauri-bundler 2.10.4 signs its own copies of the
+`Plugins/x86-unicode` plugins before makensis packs them, and the stub the uninstaller is rebuilt from is the signed
+installer's. So `nsis-parts` must then hash the signed plugin copies of each architecture's bundle, not the NSIS
+cache, and the uninstaller rule (its stub equal to the installer's apart from `.rsrc` and `CheckSum`) must be
+confirmed again on a signed installer.
 
 **A rehearsal.** Once the workflow is on `main`: `gh workflow run release.yml --ref main`, then
 `gh run list --workflow release.yml` and `gh run view <id>`. The artifacts (`unsigned-x64`, `unsigned-arm64`,
