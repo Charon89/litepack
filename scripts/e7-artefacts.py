@@ -65,7 +65,8 @@ HOLDS = {
 MACHINE = {"x64": 0x8664, "arm64": 0xAA64}
 X86 = 0x14C
 DEP = ".dep-v0"
-UNINSTALLER = ("uninstall.exe", "$INSTDIR/uninstall.exe")
+# As 7-Zip may show it (with or without the $INSTDIR prefix), compared in lower case.
+UNINSTALLER = ("uninstall.exe", "$instdir/uninstall.exe")
 
 INSTALLER_RE = re.compile(r"^.+_(?P<v>[^_]+)_(?P<arch>x64|arm64)-setup\.exe$")
 ZIP_RE = re.compile(r"^litepack-(?P<v>.+)-windows-(?P<arch>x64|arm64)-(?P<kind>portable|cli)\.zip$")
@@ -256,7 +257,7 @@ def classify(rel, path, arch, kind, unsigned):
         cls = "nsis-plugin"
         if m != X86:
             problems.append(f"machine {m:#06x}, not {X86:#06x}")
-    elif kind == "installer" and rel in UNINSTALLER:
+    elif kind == "installer" and rel.lower() in UNINSTALLER:
         cls = "nsis-uninstaller"
         if m != X86:
             problems.append(f"machine {m:#06x}, not {X86:#06x}")
@@ -477,12 +478,39 @@ def self_test(sevenzip=None):
            ["machine 0x8664, not 0x014c"])
         ok("installer: uninstall.exe at the root is the nsis-uninstaller", cls("uninstall.exe", plugin)[::3] ==
            ("nsis-uninstaller", []))
+        ok("installer: $INSTDIR/Uninstall.exe is the nsis-uninstaller", cls("$INSTDIR/Uninstall.exe", plugin)[0] ==
+           "nsis-uninstaller")
+        ok("installer: an x64 uninstall.exe fails", cls("uninstall.exe", helper)[3] == ["machine 0x8664, not 0x014c"])
         ok("installer: uninstall.exe elsewhere fits no class", cls("bin/uninstall.exe", plugin)[0] == "unclassified")
         ok("installer: an x86 PE outside $PLUGINSDIR fits no class", cls("helper.exe", plugin)[0] == "unclassified")
         ok("installer: lpk_shell.dll under shell/<v>/ is shipped",
            cls("shell/0.1.0/lpk_shell.dll", (bins["x64"] / "lpk_shell.dll").read_bytes())[::3] == ("shipped", []))
         ok("portable: lpk_shell.dll fits no class",
            cls("LitePack/lpk_shell.dll", (bins["x64"] / "lpk_shell.dll").read_bytes(), "portable")[0] == "unclassified")
+
+        # An installer-shaped artefact, its members written by hand: the six shipped PEs, the NSIS parts.
+        def installer(extra):
+            a = Artefact(d / "LitePack_0.1.0_x64-setup.exe", "x64", "installer")
+            root = d / "work" / f"inst-{len(extra)}"
+            members = [("lpk-gui.exe", "lpk-gui.exe")] + [(f"bin/{n}", n) for n in CLI_EXES]
+            members.append(("shell/0.1.0/lpk_shell.dll", "lpk_shell.dll"))
+            for rel, n in members:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes((bins["x64"] / n).read_bytes())
+            for rel, data in [("$PLUGINSDIR/System.dll", plugin), ("uninstall.exe", plugin)] + extra:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes(data)
+            a.files = [(q.relative_to(root).as_posix(), q) for q in sorted(root.rglob("*")) if q.is_file()]
+            a.listed = [rel for rel, _ in a.files]
+            a.listing = "a listing\n"
+            return a
+
+        lines, errors = pes([installer([])], unsigned)
+        ok("installer: six shipped, one plugin, one uninstaller", errors == [] and lines[-1] ==
+           "all artefacts: nsis-plugin 1, nsis-uninstaller 1, shipped 6")
+        ok("installer: the listing is printed", "a listing" in lines)
+        errors = pes([installer([("$INSTDIR/uninstall.exe", plugin)])], unsigned)[1]
+        ok("installer: two uninstallers fail", any("2 uninstallers" in e for e in errors))
 
         # 7-Zip's -slt listing.
         slt = ("7-Zip 26.03\n\nListing archive: s.exe\n\n--\nPath = s.exe\nType = Nsis\n\n----------\n"
